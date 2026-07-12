@@ -915,6 +915,12 @@ export async function publishListing(
     }
     console.warn(`[ebay/publish] sku=${sku} category=${catId}: ${msg}`);
     warnings.push(msg);
+    // Without eBay's schema we can't prove any aspect accepts multiple values —
+    // collapse to one (the long-standing safe behavior). Features is the known
+    // exception: eBay accepts several everywhere it exists.
+    for (const k of Object.keys(aspects)) {
+      if (k !== "Features" && aspects[k].length > 1) aspects[k] = aspects[k].slice(0, 1);
+    }
   } else {
     // Category-aware pass with the ORIGINAL PHOTOS + eBay's exact aspect
     // schema — recovers details (model numbers, fabric contents, necklines…)
@@ -1011,8 +1017,12 @@ export async function publishListing(
     },
     // Catalog matching helps commodity items (books, media, boxed products)
     // inherit eBay's established product data — but only when a strong,
-    // validated identifier ties this item to one catalog product.
-    includeCatalogProductDetails: hasCatalogIdentifier(identifiers),
+    // validated identifier ties this item to one catalog product AND the item
+    // class is commodity-like. A checksum-valid barcode on a collectible's
+    // repro box shouldn't overwrite the listing with the wrong catalog entry.
+    includeCatalogProductDetails:
+      hasCatalogIdentifier(identifiers) &&
+      ["media", "hard_goods"].includes(String(listing.item_profile || "")),
   };
 
   const postOffer = () =>
@@ -1040,6 +1050,15 @@ export async function publishListing(
   // for this item. Never unrelated generic categories: a wrong-category
   // publication is worse than a stopped listing.
   if (![200, 201].includes(r.status) && errorIds(r).includes(25005)) {
+    // The initial suggestion call may have failed (offline static map used,
+    // possibly non-leaf). Taxonomy might be back by now — ask once more.
+    if (!fallbacks.length) {
+      const retry = await suggestLeafCategories(
+        `${listing.category_hint || ""} ${listing.title || ""}`,
+        3
+      );
+      fallbacks.push(...retry.map((s) => s.id).filter((id) => id !== catId));
+    }
     for (const fb of fallbacks) {
       offerBody.categoryId = fb;
       const fbResp = await postOffer();
@@ -1156,6 +1175,7 @@ async function publishOfferWithRecovery(
       sku,
       offerId,
       listingId: String(off.json?.listing?.listingId || ""),
+      warnings,
     };
   }
 

@@ -68,17 +68,27 @@ export async function fillRecommendedAspects(
   }
   if (unfilled.length === 0) return;
 
+  // Bound every embedded field — a runaway model output stored in the listing
+  // must not turn this prompt into a token bomb.
+  const clip = (v: unknown, n: number) => String(v ?? "").slice(0, n);
   const itemData = {
-    title: listing.title,
-    brand: listing.brand,
-    item_type: listing.item_type,
-    color: listing.color,
-    size: listing.size,
-    material: listing.material,
-    measurements: listing.measurements,
-    key_features: listing.key_features,
-    item_specifics: listing.item_specifics,
-    description: String(listing.description || "").slice(0, 900),
+    title: clip(listing.title, 120),
+    brand: clip(listing.brand, 80),
+    item_type: clip(listing.item_type, 80),
+    color: (Array.isArray(listing.color) ? listing.color : [listing.color])
+      .filter(Boolean)
+      .slice(0, 4)
+      .map((c) => clip(c, 40)),
+    size: clip(listing.size, 40),
+    material: clip(listing.material, 80),
+    measurements: clip(listing.measurements, 200),
+    key_features: (listing.key_features ?? []).slice(0, 5).map((f) => clip(f, 100)),
+    item_specifics: Object.fromEntries(
+      Object.entries(listing.item_specifics ?? {})
+        .slice(0, 40)
+        .map(([k, v]) => [clip(k, 60), clip(v, 120)])
+    ),
+    description: clip(listing.description, 900),
   };
 
   const imageBlocks = images
@@ -138,7 +148,7 @@ Return ONLY valid JSON mapping aspect name to value (string, or array for multi-
         }
         // Splitting may have broken a compound allowed value apart — rejoin.
         if (!vals.length && parts.length > 1) {
-          for (const sep of [" & ", " / ", ", "]) {
+          for (const sep of [" & ", " / ", ", ", " and "]) {
             const joined = matchAllowed(parts.join(sep), a.values);
             if (joined) {
               vals = [joined];

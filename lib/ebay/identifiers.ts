@@ -20,6 +20,11 @@ function digitsOnly(raw: string): string {
   return raw.replace(/[\s\-–.]/g, "");
 }
 
+// All-zero codes pass the GS1 checksum but identify nothing real.
+function isAllZeros(code: string): boolean {
+  return /^0+$/.test(code);
+}
+
 // GS1 check digit (UPC-A / EAN-13): weighted sum mod 10.
 function gs1CheckOk(code: string): boolean {
   const digits = code.split("").map(Number);
@@ -34,12 +39,12 @@ function gs1CheckOk(code: string): boolean {
 
 export function validUpc(raw: string): string | null {
   const code = digitsOnly(raw);
-  return /^\d{12}$/.test(code) && gs1CheckOk(code) ? code : null;
+  return /^\d{12}$/.test(code) && !isAllZeros(code) && gs1CheckOk(code) ? code : null;
 }
 
 export function validEan(raw: string): string | null {
   const code = digitsOnly(raw);
-  return /^\d{13}$/.test(code) && gs1CheckOk(code) ? code : null;
+  return /^\d{13}$/.test(code) && !isAllZeros(code) && gs1CheckOk(code) ? code : null;
 }
 
 export function validIsbn(raw: string): string | null {

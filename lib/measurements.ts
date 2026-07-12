@@ -27,8 +27,11 @@ const MEASUREMENT_LABELS: [keyof ParsedMeasurements, RegExp][] = [
   ["length", /\b(?:length|long)\b/i],
 ];
 
-// A numeric measurement with optional fraction and unit: 29, 29.5, 29 1/2, 29", 29 in.
-const VALUE_RE = /(\d{1,3}(?:\.\d+)?(?:\s+\d\/\d)?)\s*(?:"|″|''|in(?:ch(?:es)?)?\.?\b|cm\b)?/;
+// A numeric measurement with optional fraction, range ("70-72"), and unit:
+// 29, 29.5, 29 1/2, 29-30, 29", 29 in, 70 cm. The range must be consumed so
+// the unit that FOLLOWS it is attributed correctly ("70-72 cm" is cm, not in).
+const VALUE_RE =
+  /(\d{1,3}(?:\.\d+)?(?:\s+\d\/\d)?)(?:\s*[-–~]\s*\d{1,3}(?:\.\d+)?)?\s*(?:"|″|''|in(?:ch(?:es)?)?\.?\b|cm\b)?/;
 
 function normalizeValue(raw: string, unitHint: string): string {
   const cm = /cm/i.test(unitHint);

@@ -85,6 +85,16 @@ export function ListingCard({
   const sizeRequired = SIZE_REQUIRED_CATEGORIES.has(listing?.category ?? "");
   const sizeMissing = sizeRequired && !(listing?.size ?? "").trim();
 
+  // Publishing refuses a missing/zero price (no more invented defaults), so
+  // flag it here the same way size is flagged — before the seller hits Post.
+  const priceNum =
+    typeof listing?.suggested_price === "string"
+      ? parseFloat(listing.suggested_price)
+      : listing?.suggested_price;
+  const priceMissing =
+    group.status === "done" &&
+    (priceNum === undefined || Number.isNaN(priceNum) || priceNum <= 0);
+
   return (
     <article className={`listing-card status-${group.status}`}>
       <header className="listing-card-head" onClick={() => setOpen((o) => !o)}>
@@ -103,9 +113,12 @@ export function ListingCard({
                 <span className="spinner small" aria-hidden="true" /> Writing…
               </>
             )}
-            {group.status === "done" && (
-              <>✅ {formatPrice(listing?.suggested_price)} · ready</>
-            )}
+            {group.status === "done" &&
+              (priceMissing ? (
+                <span style={{ color: "var(--color-danger)" }}>⚠️ needs a price</span>
+              ) : (
+                <>✅ {formatPrice(listing?.suggested_price)} · ready</>
+              ))}
             {group.status === "error" && (
               <span style={{ color: "var(--color-danger)" }}>
                 ⚠️ {group.error || "Failed"}
@@ -153,7 +166,7 @@ export function ListingCard({
           </div>
 
           <div className="meta-row">
-            <div className="stat editable">
+            <div className={`stat editable${priceMissing ? " needs-attention" : ""}`}>
               <label className="k" htmlFor={`price-${group.id}`}>
                 Price
               </label>
@@ -242,6 +255,14 @@ export function ListingCard({
               ⚠️ No size found on the tag. eBay now blocks apparel listings
               without a standard size — check the photos or measure the item,
               then fill in Size above before posting.
+            </p>
+          )}
+
+          {priceMissing && (
+            <p className="size-warning" role="alert">
+              ⚠️ No price yet — the analysis couldn&rsquo;t estimate one for
+              this item. Set a price above before posting
+              {group.comps?.ok ? " (see the market check under Price)" : ""}.
             </p>
           )}
 

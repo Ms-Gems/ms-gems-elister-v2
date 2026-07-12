@@ -1,31 +1,16 @@
 // Deterministic eBay-title cleanup, applied right after analysis so the title
 // the seller reviews IS the title that publishes (no silent rewriting later).
 //
-// Conservative on purpose: it never reorders or drops the model's words except
-// exact duplicates, and only appends high-value identifiers (brand, size,
-// color) the model left out when there's room under eBay's 80-character cap.
+// Conservative on purpose: it NEVER removes or reorders the model's words —
+// word-dedupe was tried and corrupted real names ("BOSS Hugo Boss",
+// "Johnson & Johnson", "Duran Duran"). It only appends high-value identifiers
+// (brand, size, color) the model left out when there's room under eBay's
+// 80-character cap, then clips at a word boundary.
 
 import type { ListingResult } from "@/lib/types";
 import { APPAREL_CATEGORIES } from "@/lib/categories";
 
 export const EBAY_TITLE_LIMIT = 80;
-
-// Words whose duplication is meaningful ("2 x 4", "Size 8 Wide 8.5").
-const DUP_EXEMPT_RE = /^\d|^(x|xs|s|m|l|xl|xxl)$/i;
-
-function dedupeWords(title: string): string {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const word of title.split(/\s+/)) {
-    const key = word.toLowerCase().replace(/[^\w'&.-]/g, "");
-    if (key && !DUP_EXEMPT_RE.test(key)) {
-      if (seen.has(key)) continue;
-      seen.add(key);
-    }
-    out.push(word);
-  }
-  return out.join(" ");
-}
 
 function clipAtWord(title: string, limit: number): string {
   if (title.length <= limit) return title;
@@ -34,8 +19,13 @@ function clipAtWord(title: string, limit: number): string {
   return (lastSpace > limit * 0.6 ? cut.slice(0, lastSpace) : cut).trim();
 }
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// Whole-word containment — a bare substring check made every one-letter size a
+// false positive ("L" is inside almost any word) and missed short colors
+// hiding inside longer words ("Tan" in "Titanium").
 function containsToken(title: string, token: string): boolean {
-  return title.toLowerCase().includes(token.toLowerCase());
+  return new RegExp(`(^|[^\\w])${escapeRe(token)}([^\\w]|$)`, "i").test(title);
 }
 
 // Candidate identifiers buyers search by, in append-priority order.
@@ -58,10 +48,11 @@ function missingTokens(listing: ListingResult, title: string): string[] {
 }
 
 export function optimizeTitle(listing: ListingResult): string {
-  let title = dedupeWords(String(listing.title || "").replace(/\s+/g, " ").trim());
+  let title = String(listing.title || "").replace(/\s+/g, " ").trim();
   for (const token of missingTokens(listing, title)) {
-    if (title.length + 1 + token.length > EBAY_TITLE_LIMIT) continue;
-    title = `${title} ${token}`;
+    const candidate = title ? `${title} ${token}` : token;
+    if (candidate.length > EBAY_TITLE_LIMIT) continue;
+    title = candidate;
   }
   return clipAtWord(title, EBAY_TITLE_LIMIT);
 }

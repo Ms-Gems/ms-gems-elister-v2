@@ -5,15 +5,40 @@ import type { ListingResult } from "@/lib/types";
 const base: ListingResult = { title: "", description: "" };
 
 describe("optimizeTitle", () => {
-  test("removes exact duplicate words", () => {
-    expect(optimizeTitle({ ...base, title: "Nike Nike Dri-Fit Running Running Top" })).toBe(
-      "Nike Dri-Fit Running Top"
+  test("NEVER removes words — repeated names are legitimate", () => {
+    expect(optimizeTitle({ ...base, title: "BOSS Hugo Boss Wool Blazer" })).toBe(
+      "BOSS Hugo Boss Wool Blazer"
+    );
+    expect(optimizeTitle({ ...base, title: "Duran Duran Rio Vinyl LP" })).toBe(
+      "Duran Duran Rio Vinyl LP"
+    );
+    expect(optimizeTitle({ ...base, title: "Mickey & Minnie Salt & Pepper Shakers" })).toBe(
+      "Mickey & Minnie Salt & Pepper Shakers"
     );
   });
 
   test("appends a missing brand when there's room", () => {
     const t = optimizeTitle({ ...base, title: "Blue Wool Sweater", brand: "Pendleton" });
     expect(t).toContain("Pendleton");
+  });
+
+  test("one-letter size appends despite the letter appearing inside words", () => {
+    const t = optimizeTitle({
+      ...base,
+      title: "Blue Wool Sweater", // contains "l" inside words
+      category: "womens_sweater",
+      size: "L",
+    });
+    expect(t).toBe("Blue Wool Sweater Sz L");
+  });
+
+  test("short color hiding inside a longer word still appends", () => {
+    const t = optimizeTitle({ ...base, title: "Titanium Ring", color: ["Tan"] });
+    expect(t).toBe("Titanium Ring Tan");
+  });
+
+  test("empty model title never yields a leading space", () => {
+    expect(optimizeTitle({ ...base, title: "", brand: "Nike" })).toBe("Nike");
   });
 
   test("appends size for apparel with the Sz prefix", () => {

@@ -41,6 +41,14 @@ describe("filterComps", () => {
     expect(prices).toEqual([40]);
   });
 
+  test("dimension titles are NOT mistaken for lots", () => {
+    const prices = filterComps(
+      [item("Framed Watercolor 16 x 20 Landscape", 45)],
+      "EXCELLENT"
+    );
+    expect(prices).toEqual([45]);
+  });
+
   test("excludes wrong-condition comps when condition ids are present", () => {
     const prices = filterComps(
       [item("Sweater", 40, "3000"), item("Sweater NWT", 90, "1000")],

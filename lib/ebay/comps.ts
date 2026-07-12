@@ -16,9 +16,10 @@ const EBAY_BROWSE_SEARCH = "https://api.ebay.com/buy/browse/v1/item_summary/sear
 export type { CompsSummary };
 
 // Comps that poison the statistics: multi-item lots when ours is one item,
-// parts/repair listings, reproductions, and empty-box scams.
+// parts/repair listings, reproductions, and empty-box scams. (No "x 12"-style
+// quantity heuristic — it false-positived on dimension titles like "16 x 20".)
 const BAD_COMP_TITLE_RE =
-  /\b(lot(?:\sof)?|bundle|wholesale|reseller|bulk|x\s?\d{2,}|for\sparts|parts\sonly|repair|broken|damaged|repro(?:duction)?|replica|fake|style\sof|box\sonly|case\sonly|manual\sonly)\b/i;
+  /\b(lot(?:\sof)?|bundle|wholesale|reseller|bulk|for\sparts|parts\sonly|repair|broken|damaged|repro(?:duction)?|replica|fake|style\sof|box\sonly|case\sonly|manual\sonly)\b/i;
 
 const NEW_CONDITION_IDS = new Set([1000, 1500, 1750]);
 
@@ -106,6 +107,12 @@ export function compStats(prices: number[]): Omit<CompsSummary, "ok" | "query" |
   };
 }
 
+// Identical items in a batch (or a re-analyze) shouldn't re-spend Browse API
+// quota — cache per warm lambda for a while.
+const compsCache = new Map<string, { summary: CompsSummary; expiresAt: number }>();
+const COMPS_TTL_MS = 10 * 60_000;
+const COMPS_CACHE_MAX = 200;
+
 // Search active comps for a listing. `appToken` comes from the taxonomy
 // module's client-credentials flow — the Browse API accepts the same scope.
 export async function searchComps(
@@ -117,6 +124,9 @@ export async function searchComps(
   if (!query) return empty;
 
   const wantNew = isNewGrade(listing.condition);
+  const cacheKey = `${query}|${wantNew ? "new" : "used"}`;
+  const cached = compsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.summary;
   const params = new URLSearchParams({
     q: query,
     limit: "50",
@@ -134,7 +144,7 @@ export async function searchComps(
   const items: BrowseItem[] = data?.itemSummaries ?? [];
   const prices = filterComps(items, listing.condition);
   const stats = compStats(prices);
-  return {
+  const summary: CompsSummary = {
     ok: stats.count > 0,
     query,
     ...stats,
@@ -143,4 +153,7 @@ export async function searchComps(
         ? `${stats.count} active ${wantNew ? "new" : "pre-owned"} listings matching “${query}” (asking prices, not sold)`
         : "",
   };
+  if (compsCache.size > COMPS_CACHE_MAX) compsCache.clear();
+  compsCache.set(cacheKey, { summary, expiresAt: Date.now() + COMPS_TTL_MS });
+  return summary;
 }

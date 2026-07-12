@@ -27,6 +27,11 @@ describe("identifier validation", () => {
     expect(validEan("4006381333932")).toBeNull();
   });
 
+  test("all-zero codes pass the checksum but are rejected anyway", () => {
+    expect(validUpc("000000000000")).toBeNull();
+    expect(validEan("0000000000000")).toBeNull();
+  });
+
   test("accepts ISBN-10 and ISBN-13, tolerating dashes", () => {
     expect(validIsbn("0-306-40615-2")).toBe("0306406152");
     expect(validIsbn("978-0-306-40615-7")).toBe("9780306406157");

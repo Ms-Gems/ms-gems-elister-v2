@@ -10,8 +10,10 @@ export const MAX_ASPECT_VALUE_LEN = 65;
 // These are not attribute values — "Material = See tag in photos" would become
 // a searchable eBay filter value. They belong in the description, never in an
 // aspect, so every aspect value passes through this check.
+// Deliberately narrow: "see"/"check" only count with a photo/tag-ish object so
+// real values like the brand "See by Chloé" or pattern "Check Print" survive.
 const PLACEHOLDER_VALUE_RE =
-  /^(see\s|refer\s|check\s|unknown\b|unclear\b|n\/?a\b|none\b|not\s(visible|shown|applicable|available|sure)|no\s(size|tag|label|brand\svisible)|unable\s|can'?t\s|tbd\b|maybe\b|possibly\b|[-?.]+$)/i;
+  /^((see|check|refer\sto)\s+.*\b(photo|pic|image|tag|label|listing|description|measurement|above|below)|unknown\b|unclear\b|n\/?a\b|none\b|not\s(visible|shown|applicable|available|sure)|no\s(size|tag|label|brand\svisible)|unable\s|can'?t\s|tbd\b|maybe\b|possibly\b|[-?.]+$)/i;
 
 export function isPlaceholderValue(s: string): boolean {
   const t = (s || "").trim();
@@ -37,13 +39,24 @@ export function cleanAspectValue(s: string, maxLen = MAX_ASPECT_VALUE_LEN): stri
 // Split a model-provided value into its parts ("Cotton / Polyester" →
 // ["Cotton", "Polyester"]), cleaning each. Multi-value aspects keep every
 // part; single-value aspects take the first (see enforceCardinality).
+//
+// A split only happens when EVERY resulting part is a real word (3+ chars):
+// "Black & White" and "Cotton/Polyester" split, while names and sizes whose
+// pieces are fragments — "AC/DC", "H&M", "Texas A&M", "9 1/2", "S/M" — stay
+// whole instead of being shredded.
+const VALUE_SEPARATOR_RE = /\s*(?:\/|,|\||&|\band\b)\s*/i;
+const MIN_SPLIT_PART_LEN = 3;
+
 export function splitAspectValues(v: unknown, maxLen = MAX_ASPECT_VALUE_LEN): string[] {
   const flat: string[] = [];
   const push = (raw: unknown) => {
     const s = String(raw ?? "").trim();
     if (!s) return;
-    // " and " needs surrounding spaces so "Sandals" doesn't split.
-    for (const part of s.split(/\s*(?:\/|,|\||&|\band\b)\s*/i)) {
+    let parts = s.split(VALUE_SEPARATOR_RE).map((p) => p.trim());
+    if (parts.length < 2 || parts.some((p) => p.length < MIN_SPLIT_PART_LEN)) {
+      parts = [s];
+    }
+    for (const part of parts) {
       const cleaned = cleanAspectValue(part.replace(/\s+/g, " "), maxLen);
       if (cleaned && !flat.some((x) => x.toLowerCase() === cleaned.toLowerCase())) {
         flat.push(cleaned);
@@ -62,7 +75,9 @@ export const MAX_MULTI_VALUES = 5;
 
 // Make every aspect's value count legal for eBay. MULTI aspects keep up to
 // MAX_MULTI_VALUES entries; SINGLE aspects (and aspects eBay doesn't know,
-// where MULTI can't be proven safe) collapse to their first value.
+// where MULTI can't be proven safe) collapse to their first value. Features
+// is the long-standing exception: eBay accepts several everywhere it exists,
+// and the app always sent it as a list.
 export function enforceCardinality(
   aspects: Record<string, string[]>,
   meta: AspectMeta[]
@@ -72,8 +87,8 @@ export function enforceCardinality(
     const a = byName.get(key.toLowerCase());
     const vals = aspects[key] || [];
     if (vals.length <= 1) continue;
-    aspects[key] =
-      a?.cardinality === "MULTI" ? vals.slice(0, MAX_MULTI_VALUES) : vals.slice(0, 1);
+    const multi = a ? a.cardinality === "MULTI" : key === "Features";
+    aspects[key] = multi ? vals.slice(0, MAX_MULTI_VALUES) : vals.slice(0, 1);
   }
 }
 

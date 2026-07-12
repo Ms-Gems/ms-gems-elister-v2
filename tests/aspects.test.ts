@@ -40,12 +40,20 @@ describe("isPlaceholderValue", () => {
     expect(isPlaceholderValue(v)).toBe(true);
   });
 
-  test.each(["Cotton", "Ralph Lauren", "Sterling Silver", "No Hood", "Multicolor", "Nylon blend"])(
-    "keeps real value %j",
-    (v) => {
-      expect(isPlaceholderValue(v)).toBe(false);
-    }
-  );
+  test.each([
+    "Cotton",
+    "Ralph Lauren",
+    "Sterling Silver",
+    "No Hood",
+    "Multicolor",
+    "Nylon blend",
+    // Real values that a sloppier regex once flagged:
+    "See by Chloé",
+    "Check Print",
+    "Not Rated",
+  ])("keeps real value %j", (v) => {
+    expect(isPlaceholderValue(v)).toBe(false);
+  });
 });
 
 describe("cleanAspectValue", () => {
@@ -85,6 +93,12 @@ describe("splitAspectValues", () => {
   test("drops placeholder parts", () => {
     expect(splitAspectValues("Unknown")).toEqual([]);
   });
+  test.each(["AC/DC", "H&M", "Texas A&M", "9 1/2", "S/M"])(
+    "never shreds names/sizes with short fragments: %j stays whole",
+    (v) => {
+      expect(splitAspectValues(v)).toEqual([v]);
+    }
+  );
 });
 
 describe("enforceCardinality", () => {
@@ -102,6 +116,12 @@ describe("enforceCardinality", () => {
     expect(aspects.Color).toEqual(["Black"]);
     // Unknown to eBay's schema — MULTI can't be proven safe.
     expect(aspects.Mystery).toEqual(["A"]);
+  });
+
+  test("Features stays multi-value even when absent from the schema", () => {
+    const aspects: Record<string, string[]> = { Features: ["Pockets", "Lined"] };
+    enforceCardinality(aspects, []);
+    expect(aspects.Features).toEqual(["Pockets", "Lined"]);
   });
 });
 

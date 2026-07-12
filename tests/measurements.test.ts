@@ -25,6 +25,11 @@ describe("parseMeasurements", () => {
     expect(parseMeasurements("waist 29.5 cm").waist).toBe("29.5 cm");
   });
 
+  test("a range before the unit keeps the right unit", () => {
+    expect(parseMeasurements("waist 70-72 cm").waist).toBe("70 cm");
+    expect(parseMeasurements("inseam approx 29-30 in").inseam).toBe("29 in");
+  });
+
   test("returns nothing for unlabeled numbers or placeholder text", () => {
     expect(parseMeasurements("29 31 42")).toEqual({});
     expect(parseMeasurements("See listing photos for measurements")).toEqual({});
