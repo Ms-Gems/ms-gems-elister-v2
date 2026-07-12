@@ -57,6 +57,20 @@ export type ItemStatus = "idle" | "writing" | "done" | "error";
 
 export type PostStatus = "idle" | "posting" | "posted" | "error";
 
+// Market price check from active eBay comps (see lib/ebay/comps.ts). Advisory:
+// shown beside the AI's estimate so the seller prices with real data in view.
+export interface CompsSummary {
+  ok: boolean;
+  query: string;
+  count: number;
+  median?: number;
+  trimmedMean?: number;
+  low?: number;
+  high?: number;
+  confidence: number;
+  basis: string;
+}
+
 export interface ItemGroup {
   id: string;
   sku: string; // bin reference, e.g. "K75-A"
@@ -65,8 +79,12 @@ export interface ItemGroup {
   listing?: ListingResult;
   status: ItemStatus;
   error?: string;
+  // Market price check (fetched right after the listing is written)
+  comps?: CompsSummary;
   // eBay posting state (Phase 2)
   postStatus?: PostStatus;
   listingId?: string;
   postError?: string;
+  // Non-fatal quality warnings from the last publish (e.g. schema unavailable)
+  postWarnings?: string[];
 }

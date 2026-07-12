@@ -11,6 +11,7 @@ import { ReviewBoard } from "./ReviewBoard";
 import { ListingsView } from "./ListingsView";
 import type {
   AnalyzeResponse,
+  CompsSummary,
   ItemGroup,
   ListingResult,
   Photo,
@@ -370,6 +371,21 @@ export default function Home() {
               : g
           )
         );
+        // Market price check — advisory and best-effort, so it runs in the
+        // background and silently stays hidden if it can't answer.
+        void (async () => {
+          try {
+            const res = await apiPost("/api/ebay/comps", { listing: data.listing });
+            const d = (await readJson(res)) as { ok?: boolean; comps?: CompsSummary };
+            if (d.ok && d.comps?.ok) {
+              setGroups((prev) =>
+                prev.map((g) => (g.id === groupId ? { ...g, comps: d.comps } : g))
+              );
+            }
+          } catch {
+            /* comps unavailable — price stays purely the AI estimate */
+          }
+        })();
       } catch (e) {
         setGroups((prev) =>
           prev.map((g) =>
@@ -419,6 +435,7 @@ export default function Home() {
           listingId?: string;
           error?: string;
           alreadyListed?: boolean;
+          warnings?: string[];
         } | null = null;
         let hadTransientRetry = false;
         for (let attempt = 0; ; attempt++) {
@@ -449,7 +466,12 @@ export default function Home() {
         setGroups((prev) =>
           prev.map((g) =>
             g.id === groupId
-              ? { ...g, postStatus: "posted", listingId: data!.listingId }
+              ? {
+                  ...g,
+                  postStatus: "posted",
+                  listingId: data!.listingId,
+                  postWarnings: data!.warnings,
+                }
               : g
           )
         );
