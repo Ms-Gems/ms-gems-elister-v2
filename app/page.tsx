@@ -277,15 +277,22 @@ export default function Home() {
 
   const movePhoto = (photoId: string, toGroupId: string | "orphans") => {
     setGroups((prev) =>
-      prev.map((g) => ({
-        ...g,
-        photoIds:
+      prev.map((g) => {
+        const nextIds =
           g.id === toGroupId
             ? g.photoIds.includes(photoId)
               ? g.photoIds
               : [...g.photoIds, photoId]
-            : g.photoIds.filter((id) => id !== photoId),
-      }))
+            : g.photoIds.filter((id) => id !== photoId);
+        // A gained/lost photo invalidates an already-written listing — reset
+        // it so "Write all listings" knows to redo this one (and only this one).
+        const changed = nextIds.length !== g.photoIds.length;
+        return {
+          ...g,
+          photoIds: nextIds,
+          ...(changed && g.status === "done" ? { status: "idle" as const } : {}),
+        };
+      })
     );
     setOrphanIds((prev) => {
       const without = prev.filter((id) => id !== photoId);
@@ -400,9 +407,15 @@ export default function Home() {
   );
 
   const writeAll = async () => {
-    const usable = groups.filter((g) => g.photoIds.length > 0).map((g) => g.id);
-    if (usable.length === 0) return;
+    // Only write listings that don't exist yet. Re-running everything after a
+    // trip back to the review step re-billed the AI for unchanged listings
+    // (issue #30) — groups whose photos changed are reset to "idle" by
+    // movePhoto, so they (and only they) get rewritten here.
+    const usable = groups
+      .filter((g) => g.photoIds.length > 0 && g.status !== "done")
+      .map((g) => g.id);
     setStep("listings");
+    if (usable.length === 0) return;
     await runPool(usable, WRITE_CONCURRENCY, writeGroup);
   };
 
@@ -671,6 +684,7 @@ export default function Home() {
           photoById={photoById}
           ebayConnected={ebayConnected}
           onEdit={editListing}
+          onRenameSku={renameSku}
           onRetry={writeGroup}
           onPost={postGroup}
           onPostAll={postAll}
