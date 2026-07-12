@@ -8,7 +8,7 @@
 // API requires special approval), so this is a sanity band, not gospel — the
 // UI presents it beside the AI estimate and the seller decides.
 
-import { EBAY_MARKETPLACE_ID } from "./config";
+import { EBAY_CURRENCY, EBAY_MARKETPLACE_ID } from "./config";
 import type { CompsSummary, ListingResult } from "@/lib/types";
 
 const EBAY_BROWSE_SEARCH = "https://api.ebay.com/buy/browse/v1/item_summary/search";
@@ -53,7 +53,9 @@ export function filterComps(
   for (const it of items) {
     const price = Number(it.price?.value);
     if (!Number.isFinite(price) || price <= 0) continue;
-    if (it.price?.currency && it.price.currency !== "USD") continue;
+    // Comps must be priced in the currency the listing will publish in —
+    // mixing currencies would corrupt the median/band silently.
+    if (it.price?.currency && it.price.currency !== EBAY_CURRENCY) continue;
     if (BAD_COMP_TITLE_RE.test(String(it.title || ""))) continue;
     const condId = Number(it.conditionId);
     if (Number.isFinite(condId) && condId > 0) {
@@ -130,7 +132,7 @@ export async function searchComps(
   const params = new URLSearchParams({
     q: query,
     limit: "50",
-    filter: `buyingOptions:{FIXED_PRICE},conditions:{${wantNew ? "NEW" : "USED"}},priceCurrency:USD`,
+    filter: `buyingOptions:{FIXED_PRICE},conditions:{${wantNew ? "NEW" : "USED"}},priceCurrency:${EBAY_CURRENCY}`,
   });
   const resp = await fetch(`${EBAY_BROWSE_SEARCH}?${params}`, {
     headers: {
