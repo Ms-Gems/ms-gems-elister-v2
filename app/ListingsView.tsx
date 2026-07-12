@@ -13,6 +13,7 @@ interface ListingsViewProps {
   photoById: (id: string) => Photo | undefined;
   ebayConnected: boolean;
   onEdit: (groupId: string, patch: Partial<ListingResult>) => void;
+  onRenameSku: (groupId: string, sku: string) => void;
   onRetry: (groupId: string) => void;
   onPost: (groupId: string) => void;
   onPostAll: () => void;
@@ -24,6 +25,7 @@ export function ListingsView({
   photoById,
   ebayConnected,
   onEdit,
+  onRenameSku,
   onRetry,
   onPost,
   onPostAll,
@@ -83,6 +85,7 @@ export function ListingsView({
             photoById={photoById}
             ebayConnected={ebayConnected}
             onEdit={onEdit}
+            onRenameSku={onRenameSku}
             onRetry={onRetry}
             onPost={onPost}
           />

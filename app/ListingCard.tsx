@@ -57,6 +57,7 @@ interface ListingCardProps {
   photoById: (id: string) => Photo | undefined;
   ebayConnected: boolean;
   onEdit: (groupId: string, patch: Partial<ListingResult>) => void;
+  onRenameSku: (groupId: string, sku: string) => void;
   onRetry: (groupId: string) => void;
   onPost: (groupId: string) => void;
 }
@@ -66,6 +67,7 @@ export function ListingCard({
   photoById,
   ebayConnected,
   onEdit,
+  onRenameSku,
   onRetry,
   onPost,
 }: ListingCardProps) {
@@ -166,6 +168,21 @@ export function ListingCard({
           </div>
 
           <div className="meta-row">
+            {/* SKU stays editable up until the item is posted, so a SKU fix
+                never requires going back and re-writing listings (issue #30). */}
+            <div className="stat editable">
+              <label className="k" htmlFor={`sku-${group.id}`}>
+                SKU
+              </label>
+              <input
+                id={`sku-${group.id}`}
+                type="text"
+                className="size-input"
+                value={group.sku}
+                disabled={group.postStatus === "posted"}
+                onChange={(e) => onRenameSku(group.id, e.target.value)}
+              />
+            </div>
             <div className={`stat editable${priceMissing ? " needs-attention" : ""}`}>
               <label className="k" htmlFor={`price-${group.id}`}>
                 Price

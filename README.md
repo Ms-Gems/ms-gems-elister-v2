@@ -53,14 +53,18 @@ You can get your own copy running without ever opening a terminal.
 
    [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/ashnicholes-droid/hahm-ebay-lister)
 
-   When Vercel asks for **Environment Variables**, set **both** of these:
+   Set **both** of these environment variables. Vercel sometimes asks for them
+   during the deploy — but **its current flow often doesn't ask at all**. If you
+   weren't prompted, deploy first, then add them under **your project →
+   Settings → Environment Variables** and hit **Redeploy** (Deployments → ⋯ →
+   Redeploy):
    - `ANTHROPIC_API_KEY` — your Anthropic key (starts with `sk-ant-`).
    - `APP_SECRET` — any access code you make up (a memorable phrase works). A
      deployed app **won't run without this**: it stops strangers from spending
      your Anthropic credits, and every AI action returns an error until it's set.
 
-   (You can add the eBay variables later.) Click **Deploy** and wait about a
-   minute — you'll get a web address like `https://your-app.vercel.app`.
+   (You can add the eBay variables later.) After deploying you'll get a web
+   address like `https://your-app.vercel.app`.
 
 **3. Bookmark your app** on your computer and add it to your phone's home
    screen. You can start sorting and writing listings immediately.
