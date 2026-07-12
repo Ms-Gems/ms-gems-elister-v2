@@ -174,6 +174,22 @@ export function ListingCard({
                   }
                 />
               </div>
+              {group.comps?.ok && group.comps.median !== undefined && (
+                <span className="comps-line" title={group.comps.basis}>
+                  Market: {group.comps.count} similar active listings, $
+                  {group.comps.low?.toFixed(0)}–${group.comps.high?.toFixed(0)}
+                  {" · "}
+                  <button
+                    type="button"
+                    className="comps-use"
+                    onClick={() =>
+                      onEdit(group.id, { suggested_price: group.comps!.median })
+                    }
+                  >
+                    use median ${group.comps.median.toFixed(2)}
+                  </button>
+                </span>
+              )}
             </div>
             <div className="stat editable">
               <label className="k" htmlFor={`cond-${group.id}`}>
@@ -257,22 +273,29 @@ export function ListingCard({
 
           {/* eBay posting */}
           {group.postStatus === "posted" ? (
-            <p className="post-result ok">
-              ✅ Posted to eBay
-              {group.listingId ? (
-                <>
-                  {" "}
-                  ·{" "}
-                  <a
-                    href={`https://www.ebay.com/itm/${group.listingId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    View listing ↗
-                  </a>
-                </>
-              ) : null}
-            </p>
+            <>
+              <p className="post-result ok">
+                ✅ Posted to eBay
+                {group.listingId ? (
+                  <>
+                    {" "}
+                    ·{" "}
+                    <a
+                      href={`https://www.ebay.com/itm/${group.listingId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      View listing ↗
+                    </a>
+                  </>
+                ) : null}
+              </p>
+              {(group.postWarnings ?? []).map((w) => (
+                <p className="post-result warn" key={w}>
+                  ⚠️ {w}
+                </p>
+              ))}
+            </>
           ) : ebayConnected ? (
             <div className="post-row">
               <button

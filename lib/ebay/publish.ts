@@ -10,13 +10,22 @@ import {
   EBAY_TRADING,
 } from "./config";
 import {
-  suggestLeafCategory,
+  suggestLeafCategories,
   categoryAspects,
   acceptedConditionIds,
   type AspectMeta,
 } from "./taxonomy";
-import { clipAspectValue, matchAllowed, canonicalizeAspectKeys } from "./aspects";
+import {
+  clipAspectValue,
+  cleanAspectValue,
+  splitAspectValues,
+  matchAllowed,
+  canonicalizeAspectKeys,
+  enforceCardinality,
+} from "./aspects";
 import { fillRecommendedAspects } from "./aspectFill";
+import { extractProductIdentifiers, hasCatalogIdentifier } from "./identifiers";
+import { parseMeasurements } from "@/lib/measurements";
 import { APPAREL_CATEGORIES, PANTS_CATEGORIES } from "@/lib/categories";
 import type { ListingResult } from "@/lib/types";
 
@@ -43,7 +52,12 @@ const CATEGORY_MAP: Record<string, string> = {
   stamp: "260", ephemera: "165800", other: "99",
 };
 
-const LEAF_FALLBACKS = ["1463", "22733", "2550", "48108", "316", "171485", "2624", "2613"];
+// NOTE: category fallbacks used to be a static list of unrelated collectible
+// leaves (dolls, plush, puzzles…) tried blindly whenever eBay rejected the
+// chosen category. Publishing a dress into "Puzzles" technically succeeds and
+// commercially fails — so fallbacks now come from eBay's own runner-up
+// category suggestions for THIS item, and when none work the publish stops
+// with an actionable error instead of landing in a wrong category.
 
 const CONDITION_ALIASES: Record<string, string> = {
   NEW: "NEW_WITH_TAGS",
@@ -182,36 +196,76 @@ async function ebayRequest(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function computeBufferedPrice(raw: number | string | undefined): number {
-  let base = typeof raw === "string" ? parseFloat(raw) : raw ?? 0;
-  if (!base || Number.isNaN(base) || base <= 0) base = 29.99;
-  const buffered = Math.max(base * 1.18, base + 5);
-  return Math.round(buffered * 100) / 100;
+// The price the seller reviewed and approved is the price that publishes.
+// (This used to silently apply an 18% markup and quietly default a missing
+// price to $29.99 → $35.39 — hiding unidentified items behind a made-up
+// number instead of stopping for review.) Returns null when there is no
+// usable price, which blocks the publish with an actionable error.
+export function validListingPrice(raw: number | string | undefined): number | null {
+  const base = typeof raw === "string" ? parseFloat(raw) : raw;
+  if (base === undefined || Number.isNaN(base) || base <= 0) return null;
+  return Math.round(base * 100) / 100;
 }
 
 // eBay's CALCULATED-shipping business policies REQUIRE package weight (and
 // dimensions) on the inventory item, or publish fails with error 25020 ("package
-// weight is not valid or is missing"). Flat-rate policies don't need it. We always
-// send a sensible default so calculated policies publish out of the box; the
-// seller can refine weight/size on the listing afterward, or tune the defaults
-// via EBAY_DEFAULT_PACKAGE_* env vars. Weight is in ounces (16 oz = 1 lb).
-function defaultPackageWeightAndSize(): Record<string, unknown> {
+// weight is not valid or is missing"). Flat-rate policies don't need it.
+//
+// One 16 oz / 12×9×3 default for everything undercharged shipping badly for
+// coats, boots, appliances, and framed art, so defaults are now profiled by
+// item class. The seller can still refine weight/size on the listing afterward.
+// Explicitly-set EBAY_DEFAULT_PACKAGE_* env vars override every profile.
+// Weight is in ounces (16 oz = 1 lb); dimensions in inches.
+interface PackageProfile {
+  oz: number;
+  l: number;
+  w: number;
+  h: number;
+  type: string;
+}
+
+const DEFAULT_PACKAGE: PackageProfile = { oz: 16, l: 12, w: 9, h: 3, type: "PACKAGE_THICK_ENVELOPE" };
+
+const PACKAGE_PROFILES: Record<string, PackageProfile> = (() => {
+  const box = (oz: number, l: number, w: number, h: number): PackageProfile => ({
+    oz, l, w, h, type: "MAILING_BOX",
+  });
+  const profiles: Record<string, PackageProfile> = {};
+  const assign = (keys: string[], p: PackageProfile) =>
+    keys.forEach((k) => (profiles[k] = p));
+  assign(["womens_coat", "mens_coat"], box(40, 16, 12, 5));
+  assign(["womens_shoes", "mens_shoes"], box(48, 14, 10, 6));
+  assign(["handbag"], box(24, 14, 11, 4));
+  assign(
+    ["small_appliance", "electronics", "camera", "audio", "musical_instrument", "tool", "automotive", "kitchenware", "sporting_goods"],
+    box(48, 14, 11, 6)
+  );
+  assign(["art", "collector_plate"], box(48, 20, 16, 4));
+  assign(["glassware", "pottery_ceramics", "doll", "collectible", "holiday", "home_decor", "lighting"], box(32, 12, 10, 8));
+  assign(["book", "media", "cd", "dvd_bluray", "video_game"], { oz: 12, l: 12, w: 9, h: 2, type: "PACKAGE_THICK_ENVELOPE" });
+  assign(["vinyl_record"], { oz: 16, l: 14, w: 14, h: 2, type: "PACKAGE_THICK_ENVELOPE" });
+  assign(["linens", "plush"], box(20, 14, 11, 4));
+  return profiles;
+})();
+
+function defaultPackageWeightAndSize(catKey: string): Record<string, unknown> {
+  const profile = PACKAGE_PROFILES[catKey] ?? DEFAULT_PACKAGE;
   const num = (v: string | undefined, fallback: number) => {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? n : fallback;
   };
   return {
     weight: {
-      value: num(process.env.EBAY_DEFAULT_PACKAGE_WEIGHT_OZ, 16),
+      value: num(process.env.EBAY_DEFAULT_PACKAGE_WEIGHT_OZ, profile.oz),
       unit: "OUNCE",
     },
     dimensions: {
-      length: num(process.env.EBAY_DEFAULT_PACKAGE_LENGTH_IN, 12),
-      width: num(process.env.EBAY_DEFAULT_PACKAGE_WIDTH_IN, 9),
-      height: num(process.env.EBAY_DEFAULT_PACKAGE_HEIGHT_IN, 3),
+      length: num(process.env.EBAY_DEFAULT_PACKAGE_LENGTH_IN, profile.l),
+      width: num(process.env.EBAY_DEFAULT_PACKAGE_WIDTH_IN, profile.w),
+      height: num(process.env.EBAY_DEFAULT_PACKAGE_HEIGHT_IN, profile.h),
       unit: "INCH",
     },
-    packageType: "PACKAGE_THICK_ENVELOPE",
+    packageType: profile.type,
   };
 }
 
@@ -274,35 +328,18 @@ function conditionCandidates(
   return out.length ? out : ["USED_GOOD"];
 }
 
-function resolveCategory(listing: ListingResult): {
-  categoryId: string;
-  fallbacks: string[];
-} {
+// Offline/static category resolution — used only when eBay's Taxonomy
+// suggestions are unavailable.
+function staticCategory(listing: ListingResult): string {
   const explicit = (listing.category_id || "").toString().trim();
   const catKey = (listing.category || "other").toString();
-  const mapped = CATEGORY_MAP[catKey] || CATEGORY_MAP.other;
-  const categoryId = explicit || mapped;
-  const fallbacks = LEAF_FALLBACKS.filter((c) => c && c !== categoryId);
-  return { categoryId, fallbacks };
+  return explicit || CATEGORY_MAP[catKey] || CATEGORY_MAP.other;
 }
 
+// First clean value of a possibly-compound field ("Cotton / Poly" → "Cotton").
+// Placeholder phrases ("See tag in photos") come back as "".
 function singleValue(v: unknown): string {
-  if (Array.isArray(v)) {
-    for (const x of v) {
-      const s = singleValue(x);
-      if (s) return s;
-    }
-    return "";
-  }
-  let s = String(v ?? "").trim();
-  if (!s) return "";
-  for (const sep of ["/", ",", "|", "&", " and "]) {
-    if (s.includes(sep)) {
-      s = s.split(sep)[0].trim();
-      break;
-    }
-  }
-  return s.replace(/\s+/g, " ");
+  return splitAspectValues(v)[0] || "";
 }
 
 function departmentForCategory(catKey: string): string {
@@ -311,40 +348,50 @@ function departmentForCategory(catKey: string): string {
   return "Unisex Adult";
 }
 
-// Build the item-specifics (aspects) map from the listing.
+// Build the item-specifics (aspects) map from the listing. Values are kept as
+// full arrays here ("Cotton / Polyester" → both parts survive); once eBay's
+// aspect metadata arrives, enforceCardinality() trims single-value aspects.
+// Placeholder phrases ("See tag in photos") never become aspect values —
+// cleanAspectValue/splitAspectValues drop them at the door.
 function buildAspects(listing: ListingResult, catKey: string): Record<string, string[]> {
   const aspects: Record<string, string[]> = {};
-  const put = (k: string, v: string) => {
-    const val = clipAspectValue(v);
+  const putOne = (k: string, v: string) => {
+    const val = cleanAspectValue(v);
     if (val) aspects[k] = [val];
   };
+  const putMany = (k: string, v: unknown) => {
+    const vals = splitAspectValues(v);
+    if (vals.length) aspects[k] = vals;
+  };
 
-  put("Brand", String(listing.brand || "").trim());
-  put("Size", cleanSize(listing.size));
-  put("Color", singleValue(listing.color));
-  put("Material", singleValue(listing.material));
-  put("Type", String(listing.item_type || "").trim());
+  putOne("Brand", String(listing.brand || "").trim());
+  putOne("Size", cleanSize(listing.size));
+  putMany("Color", listing.color);
+  putMany("Material", listing.material);
+  putOne("Type", String(listing.item_type || "").trim());
 
   const feats = Array.isArray(listing.key_features) ? listing.key_features : [];
-  const cleanFeats = feats.map((f) => clipAspectValue(String(f))).filter(Boolean).slice(0, 5);
+  const cleanFeats = feats.map((f) => cleanAspectValue(String(f))).filter(Boolean).slice(0, 5);
   if (cleanFeats.length) aspects.Features = cleanFeats;
 
   if (APPAREL_CATEGORIES.has(catKey) || catKey === "accessory") {
     aspects.Department = [departmentForCategory(catKey)];
   }
 
+  // Measurements go to eBay aspects only when explicitly labeled — never the
+  // whole free-text blob (which once produced Inseam = "Waist 32 in, rise 11…").
   if (PANTS_CATEGORIES.has(catKey)) {
-    const m = String(listing.measurements || "").trim();
-    if (m && m.toLowerCase() !== "see listing photos for measurements") {
-      aspects.Inseam = [m.slice(0, 30)];
-    }
+    const parsed = parseMeasurements(listing.measurements);
+    if (parsed.inseam) aspects.Inseam = [parsed.inseam];
+    if (parsed.waist && !aspects["Waist Size"]) aspects["Waist Size"] = [parsed.waist];
+    if (parsed.rise && !aspects.Rise) aspects.Rise = [parsed.rise];
   }
 
   // Merge in the model-provided item specifics (skip blanks + section labels).
   for (const [k, v] of Object.entries(listing.item_specifics || {})) {
     if (!k || k.startsWith("---")) continue;
-    const val = clipAspectValue(singleValue(v));
-    if (val && !aspects[k]) aspects[k] = [val];
+    const vals = splitAspectValues(v);
+    if (vals.length && !aspects[k]) aspects[k] = vals;
   }
   return aspects;
 }
@@ -378,14 +425,18 @@ function pickDepartment(allowed: string[], listing: ListingResult, catKey: strin
 
 // Best free-text fill for a required aspect we don't already have, drawn from
 // the listing itself. eBay accepts any string for FREE_TEXT aspects.
+// "Unbranded"/"Multicolor" are eBay's own canonical values for genuinely
+// unbranded/multicolored items; placeholder phrases are filtered out so
+// "See tag in photos" can never become a searchable specific.
 function freeTextDefault(name: string, listing: ListingResult): string {
   const n = name.toLowerCase();
-  if (n.includes("brand")) return String(listing.brand || "").trim() || "Unbranded";
+  const clean = (v: unknown) => cleanAspectValue(String(v ?? "").trim());
+  if (n.includes("brand")) return clean(listing.brand) || "Unbranded";
   if (n.includes("color")) return singleValue(listing.color) || "Multicolor";
   if (n.includes("shoe size") || n === "size") return cleanSize(listing.size);
-  if (n.includes("material")) return singleValue(listing.material) || "Man Made";
-  if (n.includes("style")) return String(listing.item_specifics?.Style || listing.item_type || "").trim();
-  if (n.includes("type")) return String(listing.item_type || "").trim();
+  if (n.includes("material")) return singleValue(listing.material);
+  if (n.includes("style")) return clean(listing.item_specifics?.Style || listing.item_type);
+  if (n.includes("type")) return clean(listing.item_type);
   return "";
 }
 
@@ -398,29 +449,38 @@ function reconcileAspects(
 ): void {
   for (const a of meta) {
     if (!a.required || !a.name) continue;
-    const current = aspects[a.name]?.[0];
+    const current = aspects[a.name] ?? [];
 
     if (a.mode === "SELECTION_ONLY") {
       // Must be one of eBay's allowed values, or the publish 25002-fails.
+      // Keep every valid value the listing already has (MULTI aspects may
+      // legitimately carry several).
+      const valid: string[] = [];
+      for (const v of current) {
+        const m = matchAllowed(v, a.values);
+        if (m && !valid.includes(m)) valid.push(m);
+      }
+      if (valid.length) {
+        aspects[a.name] = valid;
+        continue;
+      }
       // Size aspects never fall back to a guessed value — a wrong size
       // mislabels the item and trips eBay's standardization enforcement.
-      const canonical =
-        matchAllowed(current || "", a.values) ||
-        (isSizeAspect(a.name)
-          ? ""
-          : matchAllowed(ASPECT_DEFAULTS[a.name] || "", a.values) ||
-            (a.name === "Department" ? pickDepartment(a.values, listing, catKey) : "") ||
-            a.values[0] ||
-            "");
+      const canonical = isSizeAspect(a.name)
+        ? ""
+        : matchAllowed(ASPECT_DEFAULTS[a.name] || "", a.values) ||
+          (a.name === "Department" ? pickDepartment(a.values, listing, catKey) : "") ||
+          a.values[0] ||
+          "";
       if (canonical) aspects[a.name] = [canonical];
       else if (isSizeAspect(a.name)) delete aspects[a.name];
-    } else if (!current) {
+    } else if (!current.length) {
       // FREE_TEXT and unset — fill from the listing or a sensible default.
       const fromListing = freeTextDefault(a.name, listing);
       const v =
         fromListing ||
         (isSizeAspect(a.name) ? "" : ASPECT_DEFAULTS[a.name] || a.values[0] || "");
-      const clipped = clipAspectValue(v);
+      const clipped = clipAspectValue(v, a.maxLength);
       if (clipped) aspects[a.name] = [clipped];
     }
   }
@@ -536,14 +596,20 @@ function extractMissingAspects(r: EbayResp): string[] {
 
 function addMissingAspects(
   aspects: Record<string, string[]>,
-  missing: string[]
+  missing: string[],
+  listing: ListingResult
 ): string[] {
   const added: string[] = [];
   for (const field of missing) {
     // Never stamp a default into a size aspect — let eBay's "missing item
     // specific" error surface so the seller supplies the real size.
     if (isSizeAspect(field)) continue;
-    const def = ASPECT_DEFAULTS[field] || "Unbranded";
+    // Real listing data or a known safe default only. Stamping "Unbranded"
+    // into arbitrary fields (the old fallback) produced junk like
+    // Type = "Unbranded"; if nothing sensible exists, let eBay's error
+    // surface and tell the seller exactly which specific is missing.
+    const def = ASPECT_DEFAULTS[field] || freeTextDefault(field, listing);
+    if (!def) continue;
     aspects[field] = [def];
     added.push(`${field}=${def}`);
   }
@@ -684,6 +750,16 @@ export interface PublishResult {
   // The SKU already has a LIVE eBay listing — a duplicate bin batch, not a
   // transient failure. The client uses this to avoid clobbering the earlier item.
   alreadyListed?: boolean;
+  // Non-fatal quality problems (e.g. eBay's aspect schema couldn't be
+  // retrieved, so the listing published with generic specifics). Surfaced in
+  // the UI so degraded listings stop failing silently.
+  warnings?: string[];
+}
+
+// EBAY_STRICT_QUALITY=1 turns quality warnings into publish failures: better a
+// stopped listing than one that quietly published without searchable specifics.
+function strictQualityMode(): boolean {
+  return process.env.EBAY_STRICT_QUALITY === "1" || /^true$/i.test(process.env.EBAY_STRICT_QUALITY || "");
 }
 
 const CL = { "Content-Language": "en-US" };
@@ -744,11 +820,34 @@ export async function publishListing(
 ): Promise<PublishResult> {
   const { sku, listing } = input;
   const catKey = String(listing.category || "other");
-  const { categoryId: staticCat, fallbacks } = resolveCategory(listing);
-  // Ask eBay for the real LEAF category from the title + hint; fall back to the
-  // static map only if Taxonomy is unavailable. (Fixes 25005 non-leaf errors.)
-  const leaf = await suggestLeafCategory(`${listing.category_hint || ""} ${listing.title || ""}`);
-  let catId = leaf || staticCat;
+  const warnings: string[] = [];
+
+  // The seller-reviewed price publishes as-is — no hidden markup, no invented
+  // default. A listing with no usable price stops here for review.
+  const price = validListingPrice(listing.suggested_price);
+  if (price === null) {
+    return {
+      success: false,
+      sku,
+      error:
+        "This listing has no price. Set a price on the listing card before posting — the analysis couldn't estimate one, and posting with a made-up default would misprice the item.",
+    };
+  }
+
+  // Ask eBay for the real LEAF category from the title + hint; the runners-up
+  // become *relevant* fallbacks if eBay rejects the first pick. Fall back to
+  // the static map only if Taxonomy is unavailable. (Fixes 25005 non-leaf errors.)
+  const suggestions = await suggestLeafCategories(
+    `${listing.category_hint || ""} ${listing.title || ""}`,
+    3
+  );
+  let catId = suggestions[0]?.id || staticCategory(listing);
+  const fallbacks = suggestions.slice(1).map((s) => s.id);
+  if (!suggestions.length) {
+    warnings.push(
+      "eBay's category suggestions were unavailable — used the offline category map, which may be less precise."
+    );
+  }
 
   if (!setup.fulfillmentPolicyId || !setup.paymentPolicyId || !setup.returnPolicyId) {
     return {
@@ -783,7 +882,9 @@ export async function publishListing(
   const aspects = buildAspects(listing, catKey);
   // Ask eBay (in parallel) for the leaf category's specifics and its accepted
   // condition ids, then make both valid before creating the item.
-  // Non-fatal: the recovery loops below remain as a backup if eBay is slow.
+  // Non-fatal by default: the recovery loops below remain as a backup if eBay
+  // is slow — but the degradation is now VISIBLE (warning or, in strict
+  // quality mode, a hard stop) instead of silently publishing generic data.
   let acceptedConds = new Set<number>();
   let aspectMeta: AspectMeta[] = [];
   try {
@@ -800,12 +901,27 @@ export async function publishListing(
     }
     acceptedConds = conds;
   } catch {
-    /* taxonomy/metadata unavailable — proceed with best-effort values */
+    /* taxonomy/metadata unavailable — handled just below */
   }
-  // Fill the remaining recommended specifics from the listing data (one cheap
-  // text-only model call) so live listings stop showing "suggested" aspects.
-  if (aspectMeta.length) {
-    await fillRecommendedAspects(listing, aspects, aspectMeta, sku);
+  if (!aspectMeta.length) {
+    const msg =
+      "eBay's item-specifics schema for this category couldn't be retrieved, so searchable specifics may be incomplete.";
+    if (strictQualityMode()) {
+      return {
+        success: false,
+        sku,
+        error: `${msg} Strict quality mode is on (EBAY_STRICT_QUALITY) — try again in a minute.`,
+      };
+    }
+    console.warn(`[ebay/publish] sku=${sku} category=${catId}: ${msg}`);
+    warnings.push(msg);
+  } else {
+    // Category-aware pass with the ORIGINAL PHOTOS + eBay's exact aspect
+    // schema — recovers details (model numbers, fabric contents, necklines…)
+    // that the first, schema-blind analysis missed.
+    await fillRecommendedAspects(listing, aspects, aspectMeta, sku, input.images);
+    // Trim every aspect to a legal value count now that cardinality is known.
+    enforceCardinality(aspects, aspectMeta);
   }
   const condCandidates = conditionCandidates(listing.condition, acceptedConds, catKey);
   const condition = condCandidates[0] || "USED_EXCELLENT";
@@ -813,18 +929,26 @@ export async function publishListing(
     `[ebay/publish] sku=${sku} category=${catId} grade=${listing.condition} → condition=${condition}` +
       (acceptedConds.size ? "" : " (no condition metadata — category-key fallback)")
   );
+  // Real product identifiers (validated UPC/EAN/ISBN/MPN) ride along so eBay
+  // can catalog-match commodity items; one-off vintage pieces have none.
+  const identifiers = extractProductIdentifiers(listing);
   const inventoryItem: any = {
     product: {
       title: String(listing.title || "Untitled").slice(0, 80),
       description: listing.description || "",
       aspects,
       imageUrls: photoUrls.slice(0, 12),
+      ...(identifiers.upc ? { upc: [identifiers.upc] } : {}),
+      ...(identifiers.ean ? { ean: [identifiers.ean] } : {}),
+      ...(identifiers.isbn ? { isbn: [identifiers.isbn] } : {}),
+      ...(identifiers.mpn ? { mpn: identifiers.mpn } : {}),
     },
     condition,
     conditionDescription: listing.condition_notes || "",
     availability: { shipToLocationAvailability: { quantity: 1 } },
-    // Default weight/size so CALCULATED-shipping policies publish (eBay 25020).
-    packageWeightAndSize: defaultPackageWeightAndSize(),
+    // Class-profiled weight/size so CALCULATED-shipping policies publish
+    // (eBay 25020) without a coat shipping as a 1-lb envelope.
+    packageWeightAndSize: defaultPackageWeightAndSize(catKey),
   };
 
   const putInventory = () =>
@@ -841,7 +965,7 @@ export async function publishListing(
   let r = await putInventory();
   if (![200, 201, 204].includes(r.status)) {
     const missing = extractMissingAspects(r);
-    if (missing.length && addMissingAspects(aspects, missing).length) {
+    if (missing.length && addMissingAspects(aspects, missing, listing).length) {
       inventoryItem.product.aspects = aspects;
       r = await putInventory();
     }
@@ -871,7 +995,6 @@ export async function publishListing(
   }
 
   // 3. Offer.
-  const price = computeBufferedPrice(listing.suggested_price);
   const offerBody: any = {
     sku,
     marketplaceId: EBAY_MARKETPLACE_ID,
@@ -886,7 +1009,10 @@ export async function publishListing(
       paymentPolicyId: setup.paymentPolicyId,
       returnPolicyId: setup.returnPolicyId,
     },
-    includeCatalogProductDetails: false,
+    // Catalog matching helps commodity items (books, media, boxed products)
+    // inherit eBay's established product data — but only when a strong,
+    // validated identifier ties this item to one catalog product.
+    includeCatalogProductDetails: hasCatalogIdentifier(identifiers),
   };
 
   const postOffer = () =>
@@ -904,13 +1030,15 @@ export async function publishListing(
 
   // Recovery: missing aspects during offer create.
   if (![200, 201].includes(r.status) && extractMissingAspects(r).length) {
-    if (addMissingAspects(aspects, extractMissingAspects(r)).length) {
+    if (addMissingAspects(aspects, extractMissingAspects(r), listing).length) {
       inventoryItem.product.aspects = aspects;
       await putInventory();
       r = await postOffer();
     }
   }
-  // Recovery: non-leaf category (25005).
+  // Recovery: category rejected (25005) → try eBay's OWN runner-up suggestions
+  // for this item. Never unrelated generic categories: a wrong-category
+  // publication is worse than a stopped listing.
   if (![200, 201].includes(r.status) && errorIds(r).includes(25005)) {
     for (const fb of fallbacks) {
       offerBody.categoryId = fb;
@@ -920,6 +1048,16 @@ export async function publishListing(
         catId = fb;
         break;
       }
+    }
+    if (![200, 201].includes(r.status) && !extractExistingOfferId(r)) {
+      logPublishFailure("offer creation", sku, r);
+      return {
+        success: false,
+        sku,
+        error:
+          `eBay rejected the category for this item (tried ${[catId, ...fallbacks].join(", ")}). ` +
+          "Rather than publishing it in an unrelated category, this listing was stopped — adjust the title or re-analyze so the category suggestion improves, or post it manually.",
+      };
     }
   }
 
@@ -958,11 +1096,13 @@ export async function publishListing(
     offerId,
     catId,
     catKey,
+    listing,
     aspects,
     inventoryItem,
     offerBody,
     fallbacks,
     condCandidates,
+    warnings,
   });
 }
 
@@ -973,14 +1113,17 @@ async function publishOfferWithRecovery(
     offerId: string;
     catId: string;
     catKey: string;
+    listing: ListingResult;
     aspects: Record<string, string[]>;
     inventoryItem: any;
     offerBody: any;
     fallbacks: string[];
     condCandidates: string[];
+    warnings: string[];
   }
 ): Promise<PublishResult> {
   const { sku, offerId } = ctx;
+  const warnings = ctx.warnings.length ? ctx.warnings : undefined;
   const doPublish = () =>
     withTransientRetry(
       () =>
@@ -1002,7 +1145,7 @@ async function publishOfferWithRecovery(
     );
 
   let r = await doPublish();
-  if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "" };
+  if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
 
   // The offer already went live (e.g. an earlier attempt timed out after the
   // publish landed). That's success — recover the listing id and report it.
@@ -1020,11 +1163,11 @@ async function publishOfferWithRecovery(
 
   // Recovery: missing item specifics.
   const missing = extractMissingAspects(r);
-  if (missing.length && addMissingAspects(ctx.aspects, missing).length) {
+  if (missing.length && addMissingAspects(ctx.aspects, missing, ctx.listing).length) {
     ctx.inventoryItem.product.aspects = ctx.aspects;
     await putInventory();
     r = await doPublish();
-    if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "" };
+    if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
     eids = errorIds(r);
   }
 
@@ -1039,7 +1182,7 @@ async function publishOfferWithRecovery(
       ctx.inventoryItem.condition = alt;
       await putInventory();
       r = await doPublish();
-      if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "" };
+      if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
       eids = errorIds(r);
       if (!eids.includes(25021) && !eids.includes(25059)) break;
     }
@@ -1054,7 +1197,7 @@ async function publishOfferWithRecovery(
       });
       if ([200, 201, 204].includes(upd.status)) {
         r = await doPublish();
-        if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "" };
+        if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
       }
     }
   }

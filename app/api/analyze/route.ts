@@ -8,6 +8,7 @@ import {
   normalizeItemProfile,
 } from "@/lib/prompts";
 import { toImageBlock, type ImageBlock } from "@/lib/images";
+import { optimizeTitle } from "@/lib/titleOptimizer";
 import { resolveModel } from "@/lib/models";
 import type { AnalyzeRequestBody, ListingResult } from "@/lib/types";
 
@@ -148,6 +149,9 @@ export async function POST(req: NextRequest) {
         });
         const listing = parseModelJson<ListingResult>(firstText(resp));
         listing.item_profile = profile;
+        // Deterministic title cleanup happens HERE, before the seller reviews —
+        // the title on the card is exactly the title that publishes.
+        listing.title = optimizeTitle(listing);
         return NextResponse.json({ ok: true, listing });
       } catch (err) {
         const fatal = anthropicAuthError(err);
