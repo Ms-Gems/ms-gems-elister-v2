@@ -1,17 +1,20 @@
 /**
- * Regenerate the static CATEGORY_MAP / LEAF_FALLBACKS in lib/ebay/publish.ts
- * for the eBay marketplace you are configured for — using eBay's Taxonomy API
- * as the source of truth.
+ * Regenerate the static CATEGORY_MAP in lib/ebay/publish.ts for the eBay
+ * marketplace you are configured for — using eBay's Taxonomy API as the
+ * source of truth.
  *
  * WHY THIS EXISTS
  * ---------------
  * eBay category IDs are per-marketplace: the US category tree is id 0, the UK
  * tree is id 3, Germany is 77, etc. Some IDs coincide across sites but many do
  * not, so a leaf id that is correct on eBay.com can be a wrong (or non-leaf)
- * category on eBay.co.uk. The live publish path already resolves the right leaf
- * for the active tree via suggestLeafCategory(); CATEGORY_MAP is only the
- * OFFLINE FALLBACK used when that Taxonomy call is unavailable. This script
- * regenerates that fallback so it matches whichever marketplace you list on.
+ * category on eBay.co.uk. The live publish path already resolves the right
+ * leaf for the active tree via suggestLeafCategories() — and when eBay rejects
+ * a category it retries with eBay's own runner-up suggestions for that item,
+ * so there is no static fallback-category list to maintain. CATEGORY_MAP is
+ * only the OFFLINE FALLBACK used when the Taxonomy call is unavailable at
+ * publish time. This script regenerates it so it matches whichever marketplace
+ * you list on (and survives eBay's periodic category-tree reshuffles).
  *
  * It does NOT edit publish.ts — it prints a ready-to-paste block so you can
  * review the resolved IDs before committing them. Diff the output against the
@@ -28,7 +31,7 @@
  * env overrides from lib/ebay/config.ts, e.g.:
  *   EBAY_MARKETPLACE_ID=EBAY_GB EBAY_CATEGORY_TREE_ID=3 npx tsx scripts/refresh-category-map.ts
  *
- * Then paste the printed CATEGORY_MAP / LEAF_FALLBACKS into lib/ebay/publish.ts.
+ * Then paste the printed CATEGORY_MAP into lib/ebay/publish.ts.
  */
 
 import { suggestLeafCategory } from "../lib/ebay/taxonomy";
@@ -108,20 +111,6 @@ const QUERIES: Record<string, string> = {
   other: "everything else",
 };
 
-// Generic, high-traffic categories tried in order when a publish hits eBay's
-// "not a leaf category" error (25005). Resolved the same way so they are valid
-// leaves for the active tree.
-const FALLBACK_QUERIES = [
-  "collectible figurine",
-  "action figure",
-  "home decor ornament",
-  "book",
-  "music cd",
-  "plush soft toy",
-  "jigsaw puzzle",
-  "fashion jewelry",
-];
-
 async function resolve(query: string): Promise<string | null> {
   // suggestLeafCategory swallows errors and returns null, so retry briefly to
   // ride out transient rate limits before giving up on a key.
@@ -156,33 +145,24 @@ async function main() {
     }
   }
 
-  const fallbacks: string[] = [];
-  for (const q of FALLBACK_QUERIES) {
-    const id = await resolve(q);
-    if (id && !fallbacks.includes(id)) fallbacks.push(id);
-  }
-
   // ── Emit paste-ready source ────────────────────────────────────────────────
-  const keys = Object.keys(QUERIES); // preserve a stable, readable order
+  // Unresolved keys are omitted (a "/* TODO */" placeholder between commas is
+  // a syntax error when pasted) — the warning below says which to keep by hand.
+  const keys = Object.keys(QUERIES).filter((k) => resolved[k]); // stable order
   let map = "const CATEGORY_MAP: Record<string, string> = {\n";
   for (let i = 0; i < keys.length; i += 3) {
     const row = keys
       .slice(i, i + 3)
-      .map((k) => (resolved[k] ? `${k}: "${resolved[k]}"` : `/* TODO ${k} */`))
+      .map((k) => `${k}: "${resolved[k]}"`)
       .join(", ");
     map += `  ${row},\n`;
   }
   map += "};\n";
 
-  const leaf = `const LEAF_FALLBACKS = [${fallbacks
-    .map((f) => `"${f}"`)
-    .join(", ")}];\n`;
-
   console.log(
     `\n// Generated for ${EBAY_MARKETPLACE_ID}, tree ${EBAY_CATEGORY_TREE_ID}\n`,
   );
   console.log(map);
-  console.log(leaf);
 
   if (unresolved.length) {
     console.error(
