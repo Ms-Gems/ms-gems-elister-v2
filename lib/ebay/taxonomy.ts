@@ -23,19 +23,33 @@ import {
 } from "./config";
 
 export type AspectMode = "FREE_TEXT" | "SELECTION_ONLY";
+export type AspectUsage = "REQUIRED" | "RECOMMENDED" | "OPTIONAL";
+export type AspectCardinality = "SINGLE" | "MULTI";
 
 export interface AspectMeta {
   name: string;
   required: boolean;
+  usage: AspectUsage;
   mode: AspectMode;
+  // eBay allows one value or several for this aspect. Flattening a MULTI aspect
+  // ("Cotton/Polyester") to its first value loses searchable data.
+  cardinality: AspectCardinality;
+  maxLength?: number;
   values: string[]; // eBay's allowed/suggested values (full list for SELECTION_ONLY)
+}
+
+export interface CategorySuggestion {
+  id: string;
+  name: string;
 }
 
 // ── App token (client-credentials), cached in the warm lambda ────────────────
 
 let cachedToken: { token: string; expiresAt: number } | null = null;
 
-async function appToken(): Promise<string> {
+// Exported for other read-only eBay APIs that accept the same client-credentials
+// scope (e.g. Browse-API comp searches).
+export async function appToken(): Promise<string> {
   const now = Date.now();
   if (cachedToken && cachedToken.expiresAt > now + 60_000) return cachedToken.token;
   const creds = getEbayCreds();
@@ -74,18 +88,34 @@ async function taxGet(path: string): Promise<any | null> {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-// Resolve the best LEAF category id for a free-text query (title + hint).
-// eBay only suggests leaf categories, so the top hit is always publish-safe.
-export async function suggestLeafCategory(query: string): Promise<string | null> {
+// Resolve the best LEAF categories for a free-text query (title + hint), best
+// match first. eBay only suggests leaf categories, so every hit is publish-safe.
+// The runners-up double as *relevant* fallbacks if eBay rejects the first pick —
+// far better than the old static list of unrelated collectible categories.
+export async function suggestLeafCategories(
+  query: string,
+  limit = 3
+): Promise<CategorySuggestion[]> {
   const q = (query || "").trim().slice(0, 350);
-  if (!q) return null;
+  if (!q) return [];
   try {
     const data = await taxGet(`get_category_suggestions?q=${encodeURIComponent(q)}`);
-    const id = data?.categorySuggestions?.[0]?.category?.categoryId;
-    return id ? String(id) : null;
+    const out: CategorySuggestion[] = [];
+    for (const s of data?.categorySuggestions ?? []) {
+      const id = s?.category?.categoryId;
+      if (!id) continue;
+      out.push({ id: String(id), name: String(s?.category?.categoryName ?? "") });
+      if (out.length >= limit) break;
+    }
+    return out;
   } catch {
-    return null;
+    return [];
   }
+}
+
+export async function suggestLeafCategory(query: string): Promise<string | null> {
+  const suggestions = await suggestLeafCategories(query, 1);
+  return suggestions[0]?.id ?? null;
 }
 
 const aspectCache = new Map<string, AspectMeta[]>();
@@ -104,10 +134,20 @@ export async function categoryAspects(categoryId: string): Promise<AspectMeta[]>
       const con = a?.aspectConstraint ?? {};
       const name = String(a?.localizedAspectName ?? "").trim();
       if (!name) continue;
+      const required = Boolean(con?.aspectRequired);
+      const maxLen = Number(con?.aspectMaxLength);
       out.push({
         name,
-        required: Boolean(con?.aspectRequired),
+        required,
+        usage: required
+          ? "REQUIRED"
+          : con?.aspectUsage === "RECOMMENDED"
+            ? "RECOMMENDED"
+            : "OPTIONAL",
         mode: con?.aspectMode === "SELECTION_ONLY" ? "SELECTION_ONLY" : "FREE_TEXT",
+        cardinality:
+          con?.itemToAspectCardinality === "MULTI" ? "MULTI" : "SINGLE",
+        maxLength: Number.isFinite(maxLen) && maxLen > 0 ? maxLen : undefined,
         values: (a?.aspectValues ?? [])
           .map((v: any) => String(v?.localizedValue ?? "").trim())
           .filter(Boolean),

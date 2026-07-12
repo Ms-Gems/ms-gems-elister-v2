@@ -85,6 +85,16 @@ export function ListingCard({
   const sizeRequired = SIZE_REQUIRED_CATEGORIES.has(listing?.category ?? "");
   const sizeMissing = sizeRequired && !(listing?.size ?? "").trim();
 
+  // Publishing refuses a missing/zero price (no more invented defaults), so
+  // flag it here the same way size is flagged — before the seller hits Post.
+  const priceNum =
+    typeof listing?.suggested_price === "string"
+      ? parseFloat(listing.suggested_price)
+      : listing?.suggested_price;
+  const priceMissing =
+    group.status === "done" &&
+    (priceNum === undefined || Number.isNaN(priceNum) || priceNum <= 0);
+
   return (
     <article className={`listing-card status-${group.status}`}>
       <header className="listing-card-head" onClick={() => setOpen((o) => !o)}>
@@ -103,9 +113,12 @@ export function ListingCard({
                 <span className="spinner small" aria-hidden="true" /> Writing…
               </>
             )}
-            {group.status === "done" && (
-              <>✅ {formatPrice(listing?.suggested_price)} · ready</>
-            )}
+            {group.status === "done" &&
+              (priceMissing ? (
+                <span style={{ color: "var(--color-danger)" }}>⚠️ needs a price</span>
+              ) : (
+                <>✅ {formatPrice(listing?.suggested_price)} · ready</>
+              ))}
             {group.status === "error" && (
               <span style={{ color: "var(--color-danger)" }}>
                 ⚠️ {group.error || "Failed"}
@@ -153,7 +166,7 @@ export function ListingCard({
           </div>
 
           <div className="meta-row">
-            <div className="stat editable">
+            <div className={`stat editable${priceMissing ? " needs-attention" : ""}`}>
               <label className="k" htmlFor={`price-${group.id}`}>
                 Price
               </label>
@@ -174,6 +187,22 @@ export function ListingCard({
                   }
                 />
               </div>
+              {group.comps?.ok && group.comps.median !== undefined && (
+                <span className="comps-line" title={group.comps.basis}>
+                  Market: {group.comps.count} similar active listings, $
+                  {group.comps.low?.toFixed(0)}–${group.comps.high?.toFixed(0)}
+                  {" · "}
+                  <button
+                    type="button"
+                    className="comps-use"
+                    onClick={() =>
+                      onEdit(group.id, { suggested_price: group.comps!.median })
+                    }
+                  >
+                    use median ${group.comps.median.toFixed(2)}
+                  </button>
+                </span>
+              )}
             </div>
             <div className="stat editable">
               <label className="k" htmlFor={`cond-${group.id}`}>
@@ -229,6 +258,14 @@ export function ListingCard({
             </p>
           )}
 
+          {priceMissing && (
+            <p className="size-warning" role="alert">
+              ⚠️ No price yet — the analysis couldn&rsquo;t estimate one for
+              this item. Set a price above before posting
+              {group.comps?.ok ? " (see the market check under Price)" : ""}.
+            </p>
+          )}
+
           <div className="result-field">
             <label>Description</label>
             <textarea
@@ -257,22 +294,29 @@ export function ListingCard({
 
           {/* eBay posting */}
           {group.postStatus === "posted" ? (
-            <p className="post-result ok">
-              ✅ Posted to eBay
-              {group.listingId ? (
-                <>
-                  {" "}
-                  ·{" "}
-                  <a
-                    href={`https://www.ebay.com/itm/${group.listingId}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    View listing ↗
-                  </a>
-                </>
-              ) : null}
-            </p>
+            <>
+              <p className="post-result ok">
+                ✅ Posted to eBay
+                {group.listingId ? (
+                  <>
+                    {" "}
+                    ·{" "}
+                    <a
+                      href={`https://www.ebay.com/itm/${group.listingId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      View listing ↗
+                    </a>
+                  </>
+                ) : null}
+              </p>
+              {(group.postWarnings ?? []).map((w) => (
+                <p className="post-result warn" key={w}>
+                  ⚠️ {w}
+                </p>
+              ))}
+            </>
           ) : ebayConnected ? (
             <div className="post-row">
               <button

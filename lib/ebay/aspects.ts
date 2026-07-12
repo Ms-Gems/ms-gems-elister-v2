@@ -6,14 +6,90 @@ import type { AspectMeta } from "./taxonomy";
 // eBay rejects any item-specific (aspect) value longer than this (error 25002).
 export const MAX_ASPECT_VALUE_LEN = 65;
 
+// Buyer-facing phrases the analysis model sometimes writes for unknown fields.
+// These are not attribute values — "Material = See tag in photos" would become
+// a searchable eBay filter value. They belong in the description, never in an
+// aspect, so every aspect value passes through this check.
+// Deliberately narrow: "see"/"check" only count with a photo/tag-ish object so
+// real values like the brand "See by Chloé" or pattern "Check Print" survive.
+const PLACEHOLDER_VALUE_RE =
+  /^((see|check|refer\sto)\s+.*\b(photo|pic|image|tag|label|listing|description|measurement|above|below)|unknown\b|unclear\b|n\/?a\b|none\b|not\s(visible|shown|applicable|available|sure)|no\s(size|tag|label|brand\svisible)|unable\s|can'?t\s|tbd\b|maybe\b|possibly\b|[-?.]+$)/i;
+
+export function isPlaceholderValue(s: string): boolean {
+  const t = (s || "").trim();
+  return !t || PLACEHOLDER_VALUE_RE.test(t);
+}
+
 // Clip an aspect value to eBay's limit, breaking at a word boundary when the
 // truncation point lands far enough in to leave a readable phrase.
-export function clipAspectValue(s: string): string {
+export function clipAspectValue(s: string, maxLen = MAX_ASPECT_VALUE_LEN): string {
   const t = (s || "").trim();
-  if (t.length <= MAX_ASPECT_VALUE_LEN) return t;
-  const cut = t.slice(0, MAX_ASPECT_VALUE_LEN);
+  if (t.length <= maxLen) return t;
+  const cut = t.slice(0, maxLen);
   const lastSpace = cut.lastIndexOf(" ");
-  return (lastSpace > MAX_ASPECT_VALUE_LEN * 0.6 ? cut.slice(0, lastSpace) : cut).trim();
+  return (lastSpace > maxLen * 0.6 ? cut.slice(0, lastSpace) : cut).trim();
+}
+
+// Clean a single aspect value: placeholder phrases become "", real values get
+// clipped to eBay's length limit.
+export function cleanAspectValue(s: string, maxLen = MAX_ASPECT_VALUE_LEN): string {
+  return isPlaceholderValue(s) ? "" : clipAspectValue(s, maxLen);
+}
+
+// Split a model-provided value into its parts ("Cotton / Polyester" →
+// ["Cotton", "Polyester"]), cleaning each. Multi-value aspects keep every
+// part; single-value aspects take the first (see enforceCardinality).
+//
+// A split only happens when EVERY resulting part is a real word (3+ chars):
+// "Black & White" and "Cotton/Polyester" split, while names and sizes whose
+// pieces are fragments — "AC/DC", "H&M", "Texas A&M", "9 1/2", "S/M" — stay
+// whole instead of being shredded.
+const VALUE_SEPARATOR_RE = /\s*(?:\/|,|\||&|\band\b)\s*/i;
+const MIN_SPLIT_PART_LEN = 3;
+
+export function splitAspectValues(v: unknown, maxLen = MAX_ASPECT_VALUE_LEN): string[] {
+  const flat: string[] = [];
+  const push = (raw: unknown) => {
+    const s = String(raw ?? "").trim();
+    if (!s) return;
+    let parts = s.split(VALUE_SEPARATOR_RE).map((p) => p.trim());
+    if (parts.length < 2 || parts.some((p) => p.length < MIN_SPLIT_PART_LEN)) {
+      parts = [s];
+    }
+    for (const part of parts) {
+      const cleaned = cleanAspectValue(part.replace(/\s+/g, " "), maxLen);
+      if (cleaned && !flat.some((x) => x.toLowerCase() === cleaned.toLowerCase())) {
+        flat.push(cleaned);
+      }
+    }
+  };
+  if (Array.isArray(v)) v.forEach(push);
+  else push(v);
+  return flat;
+}
+
+// Cap how many values a MULTI aspect carries — enough to keep real data
+// ("Casual, Travel, Workwear") without letting a rambling model response
+// turn one aspect into a paragraph.
+export const MAX_MULTI_VALUES = 5;
+
+// Make every aspect's value count legal for eBay. MULTI aspects keep up to
+// MAX_MULTI_VALUES entries; SINGLE aspects (and aspects eBay doesn't know,
+// where MULTI can't be proven safe) collapse to their first value. Features
+// is the long-standing exception: eBay accepts several everywhere it exists,
+// and the app always sent it as a list.
+export function enforceCardinality(
+  aspects: Record<string, string[]>,
+  meta: AspectMeta[]
+): void {
+  const byName = new Map(meta.map((a) => [a.name.toLowerCase(), a]));
+  for (const key of Object.keys(aspects)) {
+    const a = byName.get(key.toLowerCase());
+    const vals = aspects[key] || [];
+    if (vals.length <= 1) continue;
+    const multi = a ? a.cardinality === "MULTI" : key === "Features";
+    aspects[key] = multi ? vals.slice(0, MAX_MULTI_VALUES) : vals.slice(0, 1);
+  }
 }
 
 // Match a value against eBay's allowed list, case-insensitively and tolerating
@@ -52,7 +128,26 @@ export function canonicalizeAspectKeys(
   // Snap SELECTION_ONLY values to eBay's canonical spelling where we can.
   for (const a of meta) {
     if (a.mode !== "SELECTION_ONLY" || !aspects[a.name]?.length) continue;
-    const snapped = matchAllowed(aspects[a.name][0], a.values);
-    if (snapped) aspects[a.name] = [snapped];
+    const vals = aspects[a.name];
+    const matched: string[] = [];
+    for (const v of vals) {
+      const m = matchAllowed(v, a.values);
+      if (m && !matched.includes(m)) matched.push(m);
+    }
+    if (matched.length) {
+      aspects[a.name] = matched;
+      continue;
+    }
+    // The value may be a compound allowed value that value-splitting broke
+    // apart ("Hook & Eye" → Hook, Eye) — try rejoining before giving up.
+    if (vals.length > 1) {
+      for (const sep of [" & ", " / ", ", ", " and "]) {
+        const joined = matchAllowed(vals.join(sep), a.values);
+        if (joined) {
+          aspects[a.name] = [joined];
+          break;
+        }
+      }
+    }
   }
 }
