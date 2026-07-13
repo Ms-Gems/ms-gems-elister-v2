@@ -25,7 +25,7 @@ import {
   enforceCardinality,
 } from "./aspects";
 import { fillRecommendedAspects } from "./aspectFill";
-import { extractProductIdentifiers, hasCatalogIdentifier } from "./identifiers";
+import { extractProductIdentifiers, hasCatalogIdentifier, realBrand } from "./identifiers";
 import { parseMeasurements } from "@/lib/measurements";
 import { APPAREL_CATEGORIES, PANTS_CATEGORIES } from "@/lib/categories";
 import type { ListingResult } from "@/lib/types";
@@ -617,6 +617,34 @@ function addMissingAspects(
   return added;
 }
 
+// eBay's Brand/MPN pair validation (25002, tag <BrandMPN>): fires when an MPN
+// arrives without a brand, when the pair doesn't match a catalog product, or
+// when a category requires the Brand/MPN aspects and one is absent.
+export function isBrandMpnError(r: EbayResp): boolean {
+  return /BrandMPN/i.test(r.text || "");
+}
+
+// Recovery for a rejected Brand/MPN pair: drop the product-level pair and fall
+// back to eBay's own aspect conventions — a Brand (or "Unbranded") plus MPN
+// "Does Not Apply". Both are canonical eBay values, not placeholders.
+export function applyBrandMpnFallback(
+  inventoryItem: { product: { aspects?: Record<string, string[]>; brand?: string; mpn?: string } },
+  aspects: Record<string, string[]>,
+  listing: ListingResult,
+  sku: string
+): void {
+  console.warn(
+    `[ebay/publish] sku=${sku} eBay rejected the Brand/MPN pair (<BrandMPN>) — retrying with aspect-level fallbacks`
+  );
+  delete inventoryItem.product.brand;
+  delete inventoryItem.product.mpn;
+  if (!aspects.Brand?.length) {
+    aspects.Brand = [cleanAspectValue(String(listing.brand || "").trim()) || "Unbranded"];
+  }
+  if (!aspects.MPN?.length) aspects.MPN = ["Does Not Apply"];
+  inventoryItem.product.aspects = aspects;
+}
+
 function updateOfferBody(offer: Record<string, unknown>): Record<string, unknown> {
   const skip = new Set(["sku", "marketplaceId", "format"]);
   return Object.fromEntries(Object.entries(offer).filter(([k]) => !skip.has(k)));
@@ -939,6 +967,7 @@ export async function publishListing(
   // Real product identifiers (validated UPC/EAN/ISBN/MPN) ride along so eBay
   // can catalog-match commodity items; one-off vintage pieces have none.
   const identifiers = extractProductIdentifiers(listing);
+  const brand = realBrand(listing);
   const inventoryItem: any = {
     product: {
       title: String(listing.title || "Untitled").slice(0, 80),
@@ -948,7 +977,10 @@ export async function publishListing(
       ...(identifiers.upc ? { upc: [identifiers.upc] } : {}),
       ...(identifiers.ean ? { ean: [identifiers.ean] } : {}),
       ...(identifiers.isbn ? { isbn: [identifiers.isbn] } : {}),
-      ...(identifiers.mpn ? { mpn: identifiers.mpn } : {}),
+      // eBay validates brand and MPN as a PAIR — an MPN without a brand fails
+      // publish with 25002 "Input data for tag <BrandMPN> is invalid or
+      // missing". Ship both or neither.
+      ...(identifiers.mpn && brand ? { brand, mpn: identifiers.mpn } : {}),
     },
     condition,
     conditionDescription: listing.condition_notes || "",
@@ -974,6 +1006,11 @@ export async function publishListing(
     const missing = extractMissingAspects(r);
     if (missing.length && addMissingAspects(aspects, missing, listing).length) {
       inventoryItem.product.aspects = aspects;
+      r = await putInventory();
+    }
+    // Recovery: rejected Brand/MPN pair (25002 <BrandMPN>).
+    if (![200, 201, 204].includes(r.status) && isBrandMpnError(r)) {
+      applyBrandMpnFallback(inventoryItem, aspects, listing, sku);
       r = await putInventory();
     }
     // Recovery: condition invalid for this category (25021/25059) → step down
@@ -1186,6 +1223,16 @@ async function publishOfferWithRecovery(
   const missing = extractMissingAspects(r);
   if (missing.length && addMissingAspects(ctx.aspects, missing, ctx.listing).length) {
     ctx.inventoryItem.product.aspects = ctx.aspects;
+    await putInventory();
+    r = await doPublish();
+    if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
+    eids = errorIds(r);
+  }
+
+  // Recovery: rejected Brand/MPN pair (25002 <BrandMPN>) — eBay validates the
+  // pair at publish time even when the inventory PUT succeeded.
+  if (isBrandMpnError(r)) {
+    applyBrandMpnFallback(ctx.inventoryItem, ctx.aspects, ctx.listing, sku);
     await putInventory();
     r = await doPublish();
     if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };

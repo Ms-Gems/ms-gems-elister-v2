@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   extractProductIdentifiers,
   hasCatalogIdentifier,
+  realBrand,
   validEan,
   validIsbn,
   validMpn,
@@ -67,4 +68,19 @@ describe("extractProductIdentifiers", () => {
     expect(ids).toEqual({});
     expect(hasCatalogIdentifier(ids)).toBe(false);
   });
+});
+
+describe("realBrand", () => {
+  test("returns a genuine brand", () => {
+    expect(realBrand({ title: "t", description: "d", brand: "Ralph Lauren" })).toBe(
+      "Ralph Lauren"
+    );
+  });
+
+  test.each(["No Brand", "Unbranded", "Unknown", "generic", "n/a", "", undefined])(
+    "returns empty for %j — an MPN must never ship without a real brand",
+    (b) => {
+      expect(realBrand({ title: "t", description: "d", brand: b as string })).toBe("");
+    }
+  );
 });

@@ -130,3 +130,15 @@ export function extractProductIdentifiers(listing: ListingResult): ProductIdenti
 export function hasCatalogIdentifier(ids: ProductIdentifiers): boolean {
   return Boolean(ids.upc || ids.ean || ids.isbn);
 }
+
+// A brand value eBay's Brand/MPN pair validation will accept: a real brand
+// name — not a placeholder, not the unbranded markers. eBay rejects an MPN
+// whose brand half is missing (error 25002, tag <BrandMPN>), so the publish
+// pipeline only ships an MPN when this returns something.
+export function realBrand(listing: ListingResult): string {
+  const b = String(listing.brand || "").trim();
+  if (!b || isPlaceholderValue(b) || /^(no\s?brand|unbranded|unknown|generic|n\/?a)$/i.test(b)) {
+    return "";
+  }
+  return b.slice(0, 65);
+}
