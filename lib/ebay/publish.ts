@@ -217,39 +217,46 @@ export function validListingPrice(raw: number | string | undefined): number | nu
 // item class. The seller can still refine weight/size on the listing afterward.
 // Explicitly-set EBAY_DEFAULT_PACKAGE_* env vars override every profile.
 // Weight is in ounces (16 oz = 1 lb); dimensions in inches.
+//
+// packageType is ALWAYS "PACKAGE_THICK_ENVELOPE" — eBay US's generic
+// "Package (or thick envelope)" type used for ordinary boxes too. Other enum
+// values from the Inventory API schema (e.g. MAILING_BOX) are rejected by the
+// US marketplace with error 25101 "Invalid <ShippingPackage>", and only
+// weight + dimensions actually drive calculated-shipping cost.
+export const SAFE_PACKAGE_TYPE = "PACKAGE_THICK_ENVELOPE";
+
 interface PackageProfile {
   oz: number;
   l: number;
   w: number;
   h: number;
-  type: string;
 }
 
-const DEFAULT_PACKAGE: PackageProfile = { oz: 16, l: 12, w: 9, h: 3, type: "PACKAGE_THICK_ENVELOPE" };
+const DEFAULT_PACKAGE: PackageProfile = { oz: 16, l: 12, w: 9, h: 3 };
 
 const PACKAGE_PROFILES: Record<string, PackageProfile> = (() => {
-  const box = (oz: number, l: number, w: number, h: number): PackageProfile => ({
-    oz, l, w, h, type: "MAILING_BOX",
+  const size = (oz: number, l: number, w: number, h: number): PackageProfile => ({
+    oz, l, w, h,
   });
   const profiles: Record<string, PackageProfile> = {};
   const assign = (keys: string[], p: PackageProfile) =>
     keys.forEach((k) => (profiles[k] = p));
-  assign(["womens_coat", "mens_coat"], box(40, 16, 12, 5));
-  assign(["womens_shoes", "mens_shoes"], box(48, 14, 10, 6));
-  assign(["handbag"], box(24, 14, 11, 4));
+  assign(["womens_coat", "mens_coat"], size(40, 16, 12, 5));
+  assign(["womens_shoes", "mens_shoes"], size(48, 14, 10, 6));
+  assign(["handbag"], size(24, 14, 11, 4));
   assign(
     ["small_appliance", "electronics", "camera", "audio", "musical_instrument", "tool", "automotive", "kitchenware", "sporting_goods"],
-    box(48, 14, 11, 6)
+    size(48, 14, 11, 6)
   );
-  assign(["art", "collector_plate"], box(48, 20, 16, 4));
-  assign(["glassware", "pottery_ceramics", "doll", "collectible", "holiday", "home_decor", "lighting"], box(32, 12, 10, 8));
-  assign(["book", "media", "cd", "dvd_bluray", "video_game"], { oz: 12, l: 12, w: 9, h: 2, type: "PACKAGE_THICK_ENVELOPE" });
-  assign(["vinyl_record"], { oz: 16, l: 14, w: 14, h: 2, type: "PACKAGE_THICK_ENVELOPE" });
-  assign(["linens", "plush"], box(20, 14, 11, 4));
+  assign(["art", "collector_plate"], size(48, 20, 16, 4));
+  assign(["glassware", "pottery_ceramics", "doll", "collectible", "holiday", "home_decor", "lighting"], size(32, 12, 10, 8));
+  assign(["book", "media", "cd", "dvd_bluray", "video_game"], size(12, 12, 9, 2));
+  assign(["vinyl_record"], size(16, 14, 14, 2));
+  assign(["linens", "plush"], size(20, 14, 11, 4));
   return profiles;
 })();
 
-function defaultPackageWeightAndSize(catKey: string): Record<string, unknown> {
+export function defaultPackageWeightAndSize(catKey: string): Record<string, unknown> {
   const profile = PACKAGE_PROFILES[catKey] ?? DEFAULT_PACKAGE;
   const num = (v: string | undefined, fallback: number) => {
     const n = Number(v);
@@ -266,7 +273,7 @@ function defaultPackageWeightAndSize(catKey: string): Record<string, unknown> {
       height: num(process.env.EBAY_DEFAULT_PACKAGE_HEIGHT_IN, profile.h),
       unit: "INCH",
     },
-    packageType: profile.type,
+    packageType: SAFE_PACKAGE_TYPE,
   };
 }
 
@@ -645,6 +652,35 @@ export function applyBrandMpnFallback(
   inventoryItem.product.aspects = aspects;
 }
 
+// eBay rejected the package type for this marketplace (error 25101
+// "Invalid <ShippingPackage>") — e.g. an enum value that exists in the
+// Inventory API schema but isn't accepted by eBay US.
+export function isShippingPackageError(r: EbayResp): boolean {
+  return errorIds(r).includes(25101) || /Invalid\s*<?ShippingPackage/i.test(r.text || "");
+}
+
+// Recovery for a rejected package: first snap the type to the one value eBay
+// US always accepts; if it already was that value, drop the package block
+// entirely — flat-rate policies publish fine without it, and calculated ones
+// then surface eBay's clearer "package weight is missing" (25020) instead.
+export function applyShippingPackageFallback(
+  inventoryItem: { packageWeightAndSize?: { packageType?: string } },
+  sku: string
+): void {
+  const pkg = inventoryItem.packageWeightAndSize;
+  if (pkg && pkg.packageType !== SAFE_PACKAGE_TYPE) {
+    console.warn(
+      `[ebay/publish] sku=${sku} eBay rejected packageType ${pkg.packageType} — retrying as ${SAFE_PACKAGE_TYPE}`
+    );
+    pkg.packageType = SAFE_PACKAGE_TYPE;
+  } else {
+    console.warn(
+      `[ebay/publish] sku=${sku} eBay rejected the shipping package — retrying without packageWeightAndSize`
+    );
+    delete inventoryItem.packageWeightAndSize;
+  }
+}
+
 function updateOfferBody(offer: Record<string, unknown>): Record<string, unknown> {
   const skip = new Set(["sku", "marketplaceId", "format"]);
   return Object.fromEntries(Object.entries(offer).filter(([k]) => !skip.has(k)));
@@ -1013,6 +1049,11 @@ export async function publishListing(
       applyBrandMpnFallback(inventoryItem, aspects, listing, sku);
       r = await putInventory();
     }
+    // Recovery: rejected package type (25101 Invalid <ShippingPackage>).
+    if (![200, 201, 204].includes(r.status) && isShippingPackageError(r)) {
+      applyShippingPackageFallback(inventoryItem, sku);
+      r = await putInventory();
+    }
     // Recovery: condition invalid for this category (25021/25059) → step down
     // to a grade the category accepts.
     if (
@@ -1233,6 +1274,16 @@ async function publishOfferWithRecovery(
   // pair at publish time even when the inventory PUT succeeded.
   if (isBrandMpnError(r)) {
     applyBrandMpnFallback(ctx.inventoryItem, ctx.aspects, ctx.listing, sku);
+    await putInventory();
+    r = await doPublish();
+    if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
+    eids = errorIds(r);
+  }
+
+  // Recovery: rejected package type (25101 Invalid <ShippingPackage>) — like
+  // Brand/MPN, eBay validates this at publish time.
+  if (isShippingPackageError(r)) {
+    applyShippingPackageFallback(ctx.inventoryItem, sku);
     await putInventory();
     r = await doPublish();
     if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
