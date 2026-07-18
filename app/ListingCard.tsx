@@ -213,10 +213,16 @@ export function ListingCard({
                     type="button"
                     className="comps-use"
                     onClick={() =>
-                      onEdit(group.id, { suggested_price: group.comps!.median })
+                      onEdit(group.id, {
+                        suggested_price:
+                          group.comps!.listPrice ?? group.comps!.median,
+                      })
                     }
                   >
-                    use median ${group.comps.median.toFixed(2)}
+                    {/* listPrice = median + the deployment's storewide markup */}
+                    {group.comps.listPrice !== undefined
+                      ? `use $${group.comps.listPrice.toFixed(2)} (median + markup)`
+                      : `use median $${group.comps.median.toFixed(2)}`}
                   </button>
                 </span>
               )}

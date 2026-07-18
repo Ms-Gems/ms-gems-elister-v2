@@ -3,6 +3,7 @@ import { guardApiRequest } from "@/lib/api-guard";
 import { isEbayConfigured } from "@/lib/ebay/config";
 import { appToken } from "@/lib/ebay/taxonomy";
 import { searchComps } from "@/lib/ebay/comps";
+import { applyPriceMarkup, priceMarkupPercent } from "@/lib/pricing";
 import type { ListingResult } from "@/lib/types";
 
 // One Browse-API search; quick.
@@ -31,6 +32,15 @@ export async function POST(req: NextRequest) {
   try {
     const token = await appToken();
     const comps = await searchComps(token, body.listing);
+    // The band stays raw market truth; the "use median" affordance carries the
+    // deployment's storewide markup so it matches analysis-suggested pricing.
+    const markup = priceMarkupPercent();
+    if (markup > 0 && comps.median !== undefined && comps.median > 0) {
+      return NextResponse.json({
+        ok: true,
+        comps: { ...comps, listPrice: applyPriceMarkup(comps.median, markup) },
+      });
+    }
     return NextResponse.json({ ok: true, comps });
   } catch (e) {
     // Comps are advisory — never let a market-check failure look like an outage.

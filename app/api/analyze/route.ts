@@ -9,6 +9,7 @@ import {
 } from "@/lib/prompts";
 import { toImageBlock, type ImageBlock } from "@/lib/images";
 import { optimizeTitle } from "@/lib/titleOptimizer";
+import { applyPriceMarkup, priceMarkupPercent } from "@/lib/pricing";
 import { resolveModel } from "@/lib/models";
 import type { AnalyzeRequestBody, ListingResult } from "@/lib/types";
 
@@ -152,6 +153,12 @@ export async function POST(req: NextRequest) {
         // Deterministic title cleanup happens HERE, before the seller reviews —
         // the title on the card is exactly the title that publishes.
         listing.title = optimizeTitle(listing);
+        // Same principle for the optional storewide markup: applied pre-review,
+        // so the price on the card is exactly the price that publishes.
+        listing.suggested_price = applyPriceMarkup(
+          listing.suggested_price,
+          priceMarkupPercent()
+        );
         return NextResponse.json({ ok: true, listing });
       } catch (err) {
         const fatal = anthropicAuthError(err);
