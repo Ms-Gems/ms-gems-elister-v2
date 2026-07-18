@@ -803,7 +803,31 @@ async function fetchOrCreateLocation(accessToken: string): Promise<string> {
 export interface PublishInput {
   sku: string;
   listing: ListingResult;
-  images: { mediaType: string; data: string }[];
+  // Base64 photos to upload to eBay in this request (legacy single-request
+  // flow — the whole payload counts against Vercel's 4.5 MB body limit).
+  images?: { mediaType: string; data: string }[];
+  // eBay-hosted photo URLs from /api/ebay/upload-photos. The preferred flow:
+  // photos ship in small batches beforehand, so the publish body stays tiny.
+  imageUrls?: string[];
+}
+
+// Only accept photo URLs that eBay Picture Services itself minted — anything
+// else in `imageUrls` is a malformed or tampered request, not our upload flow.
+export function sanitizeEbayImageUrls(urls: unknown): string[] {
+  if (!Array.isArray(urls)) return [];
+  const out: string[] = [];
+  for (const raw of urls) {
+    if (typeof raw !== "string") continue;
+    try {
+      const u = new URL(raw);
+      const host = u.hostname.toLowerCase();
+      const isEps = host === "ebayimg.com" || host.endsWith(".ebayimg.com");
+      if (u.protocol === "https:" && isEps && !out.includes(raw)) out.push(raw);
+    } catch {
+      /* not a URL — skip */
+    }
+  }
+  return out.slice(0, 12);
 }
 
 export interface PublishResult {
@@ -856,10 +880,15 @@ async function findPublishedOffer(
 // Upload photos with limited concurrency, preserving order. Sequential uploads
 // were the slowest part of a publish (12 photos ≈ up to a minute on their own)
 // and pushed long batches into Vercel's function timeout.
-async function uploadPhotos(
+// Exported for /api/ebay/upload-photos, which runs this over small client-side
+// batches so the publish request itself carries URLs instead of photo bytes.
+export async function uploadPhotos(
   accessToken: string,
   images: { mediaType: string; data: string }[],
-  sku: string
+  sku: string,
+  // Photo numbering offset, so batched uploads name photos K72-O-1 … K72-O-12
+  // across batches instead of restarting at 1 in each.
+  nameOffset = 0
 ): Promise<string[]> {
   const results: (string | null)[] = new Array(images.length).fill(null);
   let cursor = 0;
@@ -870,7 +899,7 @@ async function uploadPhotos(
         accessToken,
         images[i].data,
         images[i].mediaType,
-        `${sku}-${i + 1}.jpg`
+        `${sku}-${nameOffset + i + 1}.jpg`
       );
     }
   });
@@ -937,8 +966,13 @@ export async function publishListing(
     };
   }
 
-  // 1. Upload photos → EPS URLs (parallel, order preserved).
-  const photoUrls = await uploadPhotos(accessToken, input.images.slice(0, 12), sku);
+  // 1. Photo URLs — pre-uploaded by the client in small batches (preferred),
+  // or uploaded here from base64 (legacy single-request flow).
+  const providedUrls = sanitizeEbayImageUrls(input.imageUrls);
+  const legacyImages = Array.isArray(input.images) ? input.images.slice(0, 12) : [];
+  const photoUrls = providedUrls.length
+    ? providedUrls
+    : await uploadPhotos(accessToken, legacyImages, sku);
   if (photoUrls.length === 0) {
     return { success: false, sku, error: "Could not upload any photos to eBay." };
   }
@@ -989,8 +1023,9 @@ export async function publishListing(
   } else {
     // Category-aware pass with the ORIGINAL PHOTOS + eBay's exact aspect
     // schema — recovers details (model numbers, fabric contents, necklines…)
-    // that the first, schema-blind analysis missed.
-    await fillRecommendedAspects(listing, aspects, aspectMeta, sku, input.images);
+    // that the first, schema-blind analysis missed. Photos arrive as base64
+    // (legacy flow) or as the eBay-hosted URLs (batched-upload flow).
+    await fillRecommendedAspects(listing, aspects, aspectMeta, sku, legacyImages, photoUrls);
     // Trim every aspect to a legal value count now that cardinality is known.
     enforceCardinality(aspects, aspectMeta);
   }
