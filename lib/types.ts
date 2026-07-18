@@ -69,6 +69,9 @@ export interface CompsSummary {
   high?: number;
   confidence: number;
   basis: string;
+  // Median with the deployment's PRICE_MARKUP_PERCENT applied — what the
+  // "use median" button should set. Absent when no markup is configured.
+  listPrice?: number;
 }
 
 export interface ItemGroup {
