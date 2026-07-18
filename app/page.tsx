@@ -5,6 +5,7 @@ import { apiPost } from "@/lib/api-client";
 import { getAnalysisModel, getSortModel } from "@/lib/model-preferences";
 import { resizeImage } from "@/lib/resize";
 import { buildSku } from "@/lib/sku";
+import { chunkImagesForUpload } from "@/lib/uploadBatches";
 import { EbayConnect } from "./EbayConnect";
 import { ModelSelector } from "./ModelSelector";
 import { ReviewBoard } from "./ReviewBoard";
@@ -25,9 +26,13 @@ type Step = "upload" | "review" | "listings";
 const MAX_PHOTOS = 300;
 const SORT_CHUNK = 100;
 const WRITE_CONCURRENCY = 3;
-// eBay accepts at most 12 photos per listing; sending more just bloats the
-// publish request toward Vercel's body limit.
+// eBay accepts at most 12 photos per listing. They ship to eBay in small
+// batches (lib/uploadBatches.ts) before publish, so no single request ever
+// nears Vercel's 4.5 MB body limit.
 const MAX_PUBLISH_PHOTOS = 12;
+// HTTP statuses worth waiting out and retrying: rate limits and transient
+// platform errors.
+const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -39,15 +44,20 @@ function newId(): string {
 
 // Parse a fetch response as JSON, but turn non-JSON error bodies (e.g. a 413
 // "Request Entity Too Large" plain-text page) into a friendly message instead
-// of a cryptic "Unexpected token" error.
-async function readJson(res: Response): Promise<any> {
+// of a cryptic "Unexpected token" error. Callers pass a hint that fits their
+// step — "sort fewer photos" advice on a posting error sent sellers down the
+// wrong path.
+async function readJson(
+  res: Response,
+  tooLargeHint = "Try again with fewer or smaller photos."
+): Promise<any> {
   const text = await res.text();
   try {
     return JSON.parse(text);
   } catch {
     if (res.status === 413) {
       throw new Error(
-        "That was too much photo data to send at once. Try sorting fewer photos per batch."
+        `That was too much photo data to send at once. ${tooLargeHint}`
       );
     }
     throw new Error(
@@ -184,7 +194,7 @@ export default function Home() {
           })),
           sortModel: getSortModel() ?? undefined,
         });
-        const data = (await readJson(res)) as SortResponse;
+        const data = (await readJson(res, "Try sorting fewer photos per batch.")) as SortResponse;
         if (!data.ok || !data.groups) {
           throw new Error(data.error || "Could not sort the photos.");
         }
@@ -443,6 +453,42 @@ export default function Home() {
         )
       );
       try {
+        // 1. Ship the photos to eBay first, in batches small enough that no
+        // single request can hit Vercel's 4.5 MB body limit — the old
+        // all-in-one publish request 413-failed on photo-heavy listings.
+        const imageUrls: string[] = [];
+        let uploadedCount = 0;
+        for (const batch of chunkImagesForUpload(images)) {
+          for (let attempt = 0; ; attempt++) {
+            const res = await apiPost("/api/ebay/upload-photos", {
+              sku: group.sku,
+              images: batch,
+              startIndex: uploadedCount,
+            });
+            if (attempt < 2 && TRANSIENT_STATUSES.has(res.status)) {
+              await sleep(res.status === 429 ? 65_000 : 8_000);
+              continue;
+            }
+            const d = (await readJson(res)) as { ok?: boolean; error?: string; urls?: string[] };
+            if (!d.ok) throw new Error(d.error || "Could not upload photos to eBay.");
+            imageUrls.push(...(Array.isArray(d.urls) ? d.urls : []));
+            break;
+          }
+          uploadedCount += batch.length;
+        }
+        if (imageUrls.length === 0) {
+          throw new Error("Could not upload any photos to eBay.");
+        }
+        // Partial upload failures don't block the listing, but they're loud —
+        // a listing quietly missing photos sells worse and looks like a bug.
+        const uploadWarnings =
+          imageUrls.length < images.length
+            ? [
+                `${images.length - imageUrls.length} photo(s) failed to upload to eBay — the listing was posted with ${imageUrls.length}.`,
+              ]
+            : [];
+
+        // 2. Publish with the eBay-hosted URLs (a few KB instead of megabytes).
         let data: {
           success: boolean;
           listingId?: string;
@@ -455,14 +501,11 @@ export default function Home() {
           const res = await apiPost("/api/ebay/publish", {
             sku: group.sku,
             listing: group.listing,
-            images,
+            imageUrls,
           });
           // Wait out rate limits / transient platform errors instead of dying
           // mid-batch with "try again later".
-          if (
-            attempt < 2 &&
-            (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504)
-          ) {
+          if (attempt < 2 && TRANSIENT_STATUSES.has(res.status)) {
             hadTransientRetry = true;
             await sleep(res.status === 429 ? 65_000 : 8_000);
             continue;
@@ -476,6 +519,7 @@ export default function Home() {
           data = { success: true, listingId: data.listingId };
         }
         if (!data?.success) throw new Error(data?.error || "eBay rejected the listing.");
+        const allWarnings = [...uploadWarnings, ...(data.warnings ?? [])];
         setGroups((prev) =>
           prev.map((g) =>
             g.id === groupId
@@ -483,7 +527,7 @@ export default function Home() {
                   ...g,
                   postStatus: "posted",
                   listingId: data!.listingId,
-                  postWarnings: data!.warnings,
+                  postWarnings: allWarnings.length ? allWarnings : undefined,
                 }
               : g
           )

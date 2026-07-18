@@ -24,6 +24,14 @@ export function toImageBlock(img: WireImage | undefined): ImageBlock | null {
   };
 }
 
+// Image block for an already-hosted photo (e.g. eBay Picture Services after
+// the batched upload step) — Anthropic fetches the URL itself, so the photo
+// never has to ride through our serverless functions again.
+export function urlImageBlock(url: string): ImageBlock | null {
+  if (!/^https:\/\//i.test(url)) return null;
+  return { type: "image", source: { type: "url", url } };
+}
+
 // Build "Photo N:" text + image content blocks for a set of images, matching
 // _images_to_content() in the Python script.
 export function labeledContent(

@@ -14,7 +14,7 @@
 // Strictly best-effort: any failure leaves the aspects untouched.
 
 import { getClient, parseModelJson } from "@/lib/anthropic";
-import { toImageBlock, type WireImage } from "@/lib/images";
+import { toImageBlock, urlImageBlock, type WireImage } from "@/lib/images";
 import type { ListingResult } from "@/lib/types";
 import type { AspectMeta } from "./taxonomy";
 import { cleanAspectValue, matchAllowed, splitAspectValues, MAX_MULTI_VALUES } from "./aspects";
@@ -54,7 +54,11 @@ export async function fillRecommendedAspects(
   aspects: Record<string, string[]>,
   meta: AspectMeta[],
   sku: string,
-  images: WireImage[] = []
+  images: WireImage[] = [],
+  // When the client pre-uploaded photos to eBay (batched to dodge Vercel's
+  // body limit), the publish request has no base64 in hand — the vision pass
+  // reads the eBay-hosted URLs instead, so photo grounding survives.
+  imageUrls: string[] = []
 ): Promise<void> {
   const have = new Set(Object.keys(aspects).map((k) => k.toLowerCase()));
   const candidates = prioritizeAspects(
@@ -91,10 +95,11 @@ export async function fillRecommendedAspects(
     description: clip(listing.description, 900),
   };
 
-  const imageBlocks = images
-    .slice(0, MAX_FILL_IMAGES)
-    .map(toImageBlock)
-    .filter((b): b is NonNullable<ReturnType<typeof toImageBlock>> => Boolean(b));
+  const imageBlocks = (
+    images.length
+      ? images.slice(0, MAX_FILL_IMAGES).map(toImageBlock)
+      : imageUrls.slice(0, MAX_FILL_IMAGES).map(urlImageBlock)
+  ).filter((b): b is NonNullable<ReturnType<typeof toImageBlock>> => Boolean(b));
 
   const prompt = `You are completing eBay item specifics for a listing that is about to publish.
 ${imageBlocks.length ? "The photos above show the actual item. Inspect every photo again — tags, labels, stamps, close-ups — for evidence." : ""}

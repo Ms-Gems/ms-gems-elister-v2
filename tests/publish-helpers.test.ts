@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { validListingPrice } from "@/lib/ebay/publish";
+import { sanitizeEbayImageUrls, validListingPrice } from "@/lib/ebay/publish";
 import { prioritizeAspects } from "@/lib/ebay/aspectFill";
 import type { AspectMeta } from "@/lib/ebay/taxonomy";
 
@@ -50,5 +50,39 @@ describe("prioritizeAspects", () => {
     ]);
     // Stable within a tier.
     expect(sorted.map((a) => a.name)).toEqual(["Req1", "Rec1", "Rec2", "Opt1", "Opt2"]);
+  });
+});
+
+describe("sanitizeEbayImageUrls", () => {
+  const eps = (n: number) => `https://i.ebayimg.com/00/s/MTYwMFgxMjAw/z/pic${n}.jpg`;
+
+  test("accepts https eBay Picture Services URLs, preserving order", () => {
+    const urls = [eps(1), eps(2), eps(3)];
+    expect(sanitizeEbayImageUrls(urls)).toEqual(urls);
+  });
+
+  test("rejects non-eBay hosts, plain http, and junk", () => {
+    expect(
+      sanitizeEbayImageUrls([
+        "https://evil.example.com/pic.jpg",
+        "http://i.ebayimg.com/insecure.jpg",
+        "https://notebayimg.com/pic.jpg",
+        "https://fakeebayimg.com.evil.net/pic.jpg",
+        "not a url",
+        42,
+        null,
+      ])
+    ).toEqual([]);
+  });
+
+  test("dedupes and caps at eBay's 12-photo limit", () => {
+    const urls = Array.from({ length: 15 }, (_, i) => eps(i));
+    expect(sanitizeEbayImageUrls(urls)).toHaveLength(12);
+    expect(sanitizeEbayImageUrls([eps(1), eps(1), eps(2)])).toEqual([eps(1), eps(2)]);
+  });
+
+  test("non-array input yields no URLs", () => {
+    expect(sanitizeEbayImageUrls(undefined)).toEqual([]);
+    expect(sanitizeEbayImageUrls("https://i.ebayimg.com/x.jpg")).toEqual([]);
   });
 });
