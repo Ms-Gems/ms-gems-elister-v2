@@ -23,6 +23,7 @@ import {
   matchAllowed,
   canonicalizeAspectKeys,
   enforceCardinality,
+  sanitizeNumericAspects,
 } from "./aspects";
 import { fillRecommendedAspects } from "./aspectFill";
 import { extractProductIdentifiers, hasCatalogIdentifier, realBrand } from "./identifiers";
@@ -624,6 +625,60 @@ function addMissingAspects(
   return added;
 }
 
+// eBay rejected the VALUE of a specific aspect we sent (25002 "A user error
+// has occurred. Fabric weight must be greater than 0. Enter up to 1 number
+// after the decimal."). Find which sent aspect the error message names so the
+// recovery can drop it and retry — the aspect name must appear as a whole
+// word/phrase alongside validation-ish language. "Missing" errors are
+// deliberately excluded (extractMissingAspects owns those), and word
+// boundaries keep "Brand" from matching eBay's "<BrandMPN>" tag errors.
+const ASPECT_VALUE_ERROR_RE =
+  /must be|invalid|format|greater than|less than|number|decimal|numeric/i;
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function findInvalidValueAspects(
+  r: EbayResp,
+  aspects: Record<string, string[]>
+): string[] {
+  const hits: string[] = [];
+  for (const err of r.json?.errors || []) {
+    for (const piece of [err.message, err.longMessage]) {
+      const msg = String(piece || "");
+      if (!msg || !ASPECT_VALUE_ERROR_RE.test(msg) || /is missing/i.test(msg)) continue;
+      for (const name of Object.keys(aspects)) {
+        if (name.length < 3) continue;
+        const re = new RegExp(`\\b${escapeRegExp(name)}\\b`, "i");
+        if (re.test(msg) && !hits.includes(name)) hits.push(name);
+      }
+    }
+  }
+  return hits;
+}
+
+// Recovery: drop the named aspects and retry once. Losing one searchable
+// specific beats failing the whole publish; if the aspect was REQUIRED, eBay's
+// next error says exactly which specific is missing, which the seller can act
+// on directly.
+export function applyInvalidAspectFallback(
+  inventoryItem: { product: { aspects?: Record<string, string[]> } },
+  aspects: Record<string, string[]>,
+  names: string[],
+  sku: string
+): void {
+  for (const n of names) {
+    console.warn(
+      `[ebay/publish] sku=${sku} eBay rejected the value of aspect "${n}" (${JSON.stringify(
+        aspects[n] ?? []
+      )}) — retrying without it`
+    );
+    delete aspects[n];
+  }
+  inventoryItem.product.aspects = aspects;
+}
+
 // eBay's Brand/MPN pair validation (25002, tag <BrandMPN>): fires when an MPN
 // arrives without a brand, when the pair doesn't match a catalog product, or
 // when a category requires the Brand/MPN aspects and one is absent.
@@ -1028,6 +1083,15 @@ export async function publishListing(
     await fillRecommendedAspects(listing, aspects, aspectMeta, sku, legacyImages, photoUrls);
     // Trim every aspect to a legal value count now that cardinality is known.
     enforceCardinality(aspects, aspectMeta);
+    // NUMBER-typed aspects must carry a bare positive number or eBay rejects
+    // the publish (25002 "Fabric weight must be greater than 0") — run LAST so
+    // model-filled and reconciled values are covered too.
+    const droppedNumeric = sanitizeNumericAspects(aspects, aspectMeta);
+    if (droppedNumeric.length) {
+      console.warn(
+        `[ebay/publish] sku=${sku} dropped non-numeric value(s) for numeric aspect(s): ${droppedNumeric.join(", ")}`
+      );
+    }
   }
   const condCandidates = conditionCandidates(listing.condition, acceptedConds, catKey);
   const condition = condCandidates[0] || "USED_EXCELLENT";
@@ -1088,6 +1152,15 @@ export async function publishListing(
     if (![200, 201, 204].includes(r.status) && isShippingPackageError(r)) {
       applyShippingPackageFallback(inventoryItem, sku);
       r = await putInventory();
+    }
+    // Recovery: an aspect VALUE eBay's validators rejected (25002 "Fabric
+    // weight must be greater than 0") → drop the named aspect(s), retry once.
+    if (![200, 201, 204].includes(r.status)) {
+      const badAspects = findInvalidValueAspects(r, aspects);
+      if (badAspects.length) {
+        applyInvalidAspectFallback(inventoryItem, aspects, badAspects, sku);
+        r = await putInventory();
+      }
     }
     // Recovery: condition invalid for this category (25021/25059) → step down
     // to a grade the category accepts.
@@ -1319,6 +1392,18 @@ async function publishOfferWithRecovery(
   // Brand/MPN, eBay validates this at publish time.
   if (isShippingPackageError(r)) {
     applyShippingPackageFallback(ctx.inventoryItem, sku);
+    await putInventory();
+    r = await doPublish();
+    if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };
+    eids = errorIds(r);
+  }
+
+  // Recovery: an aspect VALUE eBay's validators rejected (25002 "Fabric weight
+  // must be greater than 0") — like Brand/MPN, this fires at publish time even
+  // when the inventory PUT succeeded. Drop the named aspect(s) and retry once.
+  const badAspects = findInvalidValueAspects(r, ctx.aspects);
+  if (badAspects.length) {
+    applyInvalidAspectFallback(ctx.inventoryItem, ctx.aspects, badAspects, sku);
     await putInventory();
     r = await doPublish();
     if (r.ok) return { success: true, sku, offerId, listingId: r.json?.listingId || "", warnings };

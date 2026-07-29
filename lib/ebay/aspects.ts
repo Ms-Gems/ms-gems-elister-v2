@@ -92,6 +92,38 @@ export function enforceCardinality(
   }
 }
 
+// eBay hard-validates NUMBER-typed aspects at publish time ("Fabric weight
+// must be greater than 0. Enter up to 1 number after the decimal.") — a prose
+// value like "Heavyweight" fails the whole listing with 25002. Keep only a
+// positive numeric token pulled from each value ("6.1 oz" → "6.1", int32
+// aspects rounded to whole numbers) and drop the aspect entirely when none of
+// its values contain one. Returns the names of dropped aspects for logging.
+export function sanitizeNumericAspects(
+  aspects: Record<string, string[]>,
+  meta: AspectMeta[]
+): string[] {
+  const dropped: string[] = [];
+  const byName = new Map(meta.map((a) => [a.name.toLowerCase(), a]));
+  for (const key of Object.keys(aspects)) {
+    const a = byName.get(key.toLowerCase());
+    if (!a || a.dataType !== "NUMBER") continue;
+    const kept: string[] = [];
+    for (const v of aspects[key] || []) {
+      const m = String(v).match(/-?\d+(?:\.\d+)?/);
+      if (!m) continue;
+      const num = a.format === "int32" ? String(Math.round(Number(m[0]))) : m[0];
+      if (Number(num) > 0 && !kept.includes(num)) kept.push(num);
+    }
+    if (kept.length) {
+      aspects[key] = kept;
+    } else {
+      delete aspects[key];
+      dropped.push(key);
+    }
+  }
+  return dropped;
+}
+
 // Match a value against eBay's allowed list, case-insensitively and tolerating
 // singular/plural (so "Unisex Adult" resolves to the valid "Unisex Adults").
 // Returns the canonical allowed value, or null if there's no match.

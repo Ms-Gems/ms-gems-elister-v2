@@ -35,6 +35,11 @@ export interface AspectMeta {
   // ("Cotton/Polyester") to its first value loses searchable data.
   cardinality: AspectCardinality;
   maxLength?: number;
+  // eBay validates value FORMAT at publish time for typed aspects — a prose
+  // value in a NUMBER aspect ("Fabric Weight" = "Heavyweight") hard-fails the
+  // publish with 25002 ("Fabric weight must be greater than 0").
+  dataType?: string; // e.g. "STRING" | "NUMBER" | "DATE"
+  format?: string; // e.g. "int32" | "double"
   values: string[]; // eBay's allowed/suggested values (full list for SELECTION_ONLY)
 }
 
@@ -148,6 +153,8 @@ export async function categoryAspects(categoryId: string): Promise<AspectMeta[]>
         cardinality:
           con?.itemToAspectCardinality === "MULTI" ? "MULTI" : "SINGLE",
         maxLength: Number.isFinite(maxLen) && maxLen > 0 ? maxLen : undefined,
+        dataType: con?.aspectDataType ? String(con.aspectDataType) : undefined,
+        format: con?.aspectFormat ? String(con.aspectFormat) : undefined,
         values: (a?.aspectValues ?? [])
           .map((v: any) => String(v?.localizedValue ?? "").trim())
           .filter(Boolean),
