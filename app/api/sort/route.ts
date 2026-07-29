@@ -5,8 +5,11 @@ import { sortPhotos, SortUnavailableError } from "@/lib/sortPipeline";
 import { isAllowedModel } from "@/lib/models";
 import type { WireImage } from "@/lib/images";
 
-// Sorting makes several model calls across grouping/verify/merge stages.
-export const maxDuration = 120;
+// Sorting makes several model calls across grouping/verify/merge stages. 300s
+// (already used by the publish route) gives slow Anthropic days room to finish;
+// the pipeline's own SORT_TIME_BUDGET_MS (250s) makes it return a partial
+// result before the platform would kill the function.
+export const maxDuration = 300;
 
 const MAX_PHOTOS = 120;
 

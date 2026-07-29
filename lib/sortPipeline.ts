@@ -18,6 +18,18 @@ const GROUP_CONCURRENCY = 2;
 const VERIFY_CONCURRENCY = 3;
 const MERGE_CONCURRENCY = 4;
 
+// The sort route runs under a 300s Vercel maxDuration. Stop starting new work
+// with headroom to spare so a slow run returns a usable (if less polished)
+// result instead of being killed by the platform (FUNCTION_INVOCATION_TIMEOUT,
+// which loses everything).
+export const SORT_TIME_BUDGET_MS = 250_000;
+// Cap each Anthropic call — the SDK default timeout is 10 MINUTES, so one
+// stalled call could otherwise eat the whole function budget before our own
+// retry logic ever saw it.
+const PER_CALL_TIMEOUT_MS = 60_000;
+// Don't bother starting a call with less budget than this left.
+const MIN_CALL_MS = 5_000;
+
 const RETRYABLE_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 
 export interface SortGroup {
@@ -65,20 +77,33 @@ async function mapLimit<T, R>(
 }
 
 // Call Claude and parse JSON, retrying transient/rate-limit errors with backoff.
+// `deadline` (epoch ms) bounds the whole attempt loop: calls are skipped once
+// the budget is (nearly) spent, and each call's HTTP timeout never extends past
+// it. SDK-internal retries are disabled — this loop is the only retry layer, so
+// time spent is predictable.
 async function claudeJson<T>(
   client: Anthropic,
   model: string,
   content: Anthropic.ContentBlockParam[],
   maxTokens: number,
-  label: string
+  label: string,
+  deadline: number
 ): Promise<T | null> {
   for (let attempt = 0; attempt < 4; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining < MIN_CALL_MS) {
+      console.warn(`[sort] ${label}: time budget exhausted — skipping call`);
+      return null;
+    }
     try {
-      const resp = await client.messages.create({
-        model,
-        max_tokens: maxTokens,
-        messages: [{ role: "user", content }],
-      });
+      const resp = await client.messages.create(
+        {
+          model,
+          max_tokens: maxTokens,
+          messages: [{ role: "user", content }],
+        },
+        { timeout: Math.min(PER_CALL_TIMEOUT_MS, remaining), maxRetries: 0 }
+      );
       return parseModelJson<T>(firstText(resp));
     } catch (e) {
       const status =
@@ -91,6 +116,10 @@ async function claudeJson<T>(
       const retryable = status === undefined || RETRYABLE_STATUS.has(status);
       if (attempt < 3 && retryable) {
         const wait = Math.min(10000, 800 * 2 ** attempt) + Math.floor(Math.random() * 400);
+        if (Date.now() + wait + MIN_CALL_MS >= deadline) {
+          console.warn(`[sort] ${label}: no budget left for retry — giving up`);
+          return null;
+        }
         console.warn(`[sort] ${label}: ${status ?? "parse/conn"} error — retry ${attempt + 1} in ${wait}ms`);
         await sleep(wait);
         continue;
@@ -108,7 +137,8 @@ async function claudeJson<T>(
 async function groupPhotos(
   client: Anthropic,
   images: WireImage[],
-  model: string
+  model: string,
+  deadline: number
 ): Promise<{ name: string; indices: number[] }[]> {
   const total = images.length;
   const batches: { offset: number; batch: WireImage[]; labelStart: number; labelEnd: number }[] = [];
@@ -129,7 +159,7 @@ async function groupPhotos(
     });
     const data = await claudeJson<{
       groups?: { folder_name?: string; photo_indices?: number[] }[];
-    }>(client, model, content, 2000, `group ${b.labelStart}-${b.labelEnd}`);
+    }>(client, model, content, 2000, `group ${b.labelStart}-${b.labelEnd}`, deadline);
 
     const out: { name: string; indices: number[] }[] = [];
     for (const g of data?.groups ?? []) {
@@ -156,11 +186,14 @@ async function groupPhotos(
 }
 
 // Step 2 — verify each multi-photo group for accidentally mixed items.
+// A verify that can't run (budget spent) keeps the group as sorted — a rougher
+// result beats a platform timeout that loses the whole sort.
 async function verifyGroups(
   client: Anthropic,
   images: WireImage[],
   groups: { name: string; indices: number[] }[],
-  model: string
+  model: string,
+  deadline: number
 ): Promise<{ groups: { name: string; indices: number[] }[]; orphans: number[] }> {
   const orphans: number[] = [];
 
@@ -173,7 +206,8 @@ async function verifyGroups(
       model,
       content,
       300,
-      `verify ${group.name}`
+      `verify ${group.name}`,
+      deadline
     );
 
     if (!result || result.valid !== false) return group;
@@ -192,11 +226,13 @@ async function verifyGroups(
 }
 
 // Step 3 — merge adjacent groups that are really one item split in two.
+// A pair that can't be checked (budget spent) simply stays unmerged.
 async function mergeSplitGroups(
   client: Anthropic,
   images: WireImage[],
   groups: { name: string; indices: number[] }[],
-  model: string
+  model: string,
+  deadline: number
 ): Promise<{ name: string; indices: number[] }[]> {
   if (groups.length < 2) return groups;
 
@@ -219,7 +255,8 @@ async function mergeSplitGroups(
       model,
       content,
       100,
-      `merge ${i}`
+      `merge ${i}`,
+      deadline
     );
     return result?.merge === true;
   });
@@ -278,7 +315,9 @@ export async function checkMergePair(
     model ?? CHECK_MODEL,
     content,
     100,
-    "merge chunk-boundary"
+    "merge chunk-boundary",
+    // The merge-check route runs under a 30s maxDuration — budget within it.
+    Date.now() + 25_000
   );
   return result?.merge === true;
 }
@@ -286,12 +325,14 @@ export async function checkMergePair(
 export async function sortPhotos(
   client: Anthropic,
   images: WireImage[],
-  model?: string
+  model?: string,
+  budgetMs: number = SORT_TIME_BUDGET_MS
 ): Promise<SortResult> {
   const m = model ?? GROUP_MODEL;
-  const grouped = await groupPhotos(client, images, m);
+  const deadline = Date.now() + budgetMs;
+  const grouped = await groupPhotos(client, images, m, deadline);
   if (grouped.length === 0) return { groups: [], orphanIndices: [] };
-  const verified = await verifyGroups(client, images, grouped, m);
-  const merged = await mergeSplitGroups(client, images, verified.groups, m);
+  const verified = await verifyGroups(client, images, grouped, m, deadline);
+  const merged = await mergeSplitGroups(client, images, verified.groups, m, deadline);
   return { groups: uniqueNames(merged), orphanIndices: verified.orphans };
 }
