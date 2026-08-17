@@ -1,0 +1,329 @@
+import { NextRequest, NextResponse } from "next/server";
+import { EBAY_COOKIE, accessTokenFromCookie } from "@/lib/ebay/session";
+import { guardApiRequest } from "@/lib/api-guard";
+import {
+  sanitizeEbayImageUrls,
+  uploadPhotos,
+  type PublishInput,
+} from "@/lib/ebay/publish";
+import { suggestLeafCategories } from "@/lib/ebay/taxonomy";
+
+export const maxDuration = 300;
+
+const FEED_BASE = "https://api.ebay.com/sell/feed/v1";
+
+function csvCell(value: unknown): string {
+  const text = String(value ?? "");
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildDraftCsv(args: {
+  sku: string;
+  categoryId: string;
+  title: string;
+  price: string;
+  imageUrls: string[];
+  description: string;
+}): string {
+  const header =
+    "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)";
+
+  const rows = [
+    [
+      "#INFO",
+      "Version=0.0.2",
+      "Template= eBay-draft-listings-template_US",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ],
+    [
+      "#INFO Action and Category ID are required fields. 1) Set Action to Draft 2) Please find the category ID for your listings here: https://pages.ebay.com/sellerinformation/news/categorychanges.html",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ],
+    [
+      "#INFO After you've successfully uploaded your draft from the Seller Hub Reports tab, complete your drafts to active listings here: https://www.ebay.com/sh/lst/drafts",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ],
+    ["#INFO", "", "", "", "", "", "", "", "", "", ""],
+    [
+      header,
+      "Custom label (SKU)",
+      "Category ID",
+      "Title",
+      "UPC",
+      "Price",
+      "Quantity",
+      "Item photo URL",
+      "Condition ID",
+      "Description",
+      "Format",
+    ],
+    [
+      "Draft",
+      args.sku,
+      args.categoryId,
+      args.title,
+      "",
+      args.price,
+      "1",
+      args.imageUrls.join("|"),
+      "",
+      args.description,
+      "FixedPrice",
+    ],
+  ];
+
+  return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+}
+
+async function ebayError(resp: Response): Promise<string> {
+  const text = await resp.text();
+
+  try {
+    const json = JSON.parse(text);
+    const err = json?.errors?.[0];
+    return String(
+      err?.longMessage ||
+        err?.message ||
+        text ||
+        `eBay returned HTTP ${resp.status}`
+    );
+  } catch {
+    return text || `eBay returned HTTP ${resp.status}`;
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const denied = guardApiRequest(req);
+  if (denied) return denied;
+
+  let body: PublishInput;
+
+  try {
+    body = (await req.json()) as PublishInput;
+  } catch {
+    return NextResponse.json(
+      { success: false, error: "Invalid request." },
+      { status: 400 }
+    );
+  }
+
+  if (!body?.sku || !body?.listing) {
+    return NextResponse.json(
+      { success: false, error: "Missing SKU or listing." },
+      { status: 400 }
+    );
+  }
+
+  let accessToken: string | null;
+
+  try {
+    accessToken = await accessTokenFromCookie(
+      req.cookies.get(EBAY_COOKIE)?.value
+    );
+  } catch (e) {
+    return NextResponse.json(
+      { success: false, error: (e as Error).message },
+      { status: 500 }
+    );
+  }
+
+  if (!accessToken) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "eBay isn't connected. Connect your account and try again.",
+      },
+      { status: 401 }
+    );
+  }
+
+  try {
+    const listing = body.listing;
+
+    // Use already-uploaded eBay photos when available.
+    let imageUrls = sanitizeEbayImageUrls(body.imageUrls);
+
+    // Also support the older single-request photo flow.
+    if (!imageUrls.length && Array.isArray(body.images) && body.images.length) {
+      imageUrls = await uploadPhotos(
+        accessToken,
+        body.images,
+        body.sku
+      );
+    }
+
+    // Use the category already selected by the analyzer when it has one.
+    // Otherwise ask eBay Taxonomy for the best matching leaf category.
+    let categoryId = String(listing.category_id || "").trim();
+
+    if (!categoryId) {
+      const suggestions = await suggestLeafCategories(
+        `${listing.category_hint || ""} ${listing.title || ""}`,
+        1
+      );
+      categoryId = String(suggestions[0]?.id || "");
+    }
+
+    if (!categoryId) {
+      return NextResponse.json(
+        {
+          success: false,
+          sku: body.sku,
+          error: "Couldn't determine an eBay category for this draft.",
+        },
+        { status: 422 }
+      );
+    }
+
+    const priceNumber =
+      typeof listing.suggested_price === "string"
+        ? Number.parseFloat(listing.suggested_price)
+        : Number(listing.suggested_price);
+
+    const price =
+      Number.isFinite(priceNumber) && priceNumber > 0
+        ? priceNumber.toFixed(2)
+        : "";
+
+    const title = String(listing.title || "").trim().slice(0, 80);
+
+    const description = String(
+      listing.description ||
+        listing.condition_notes ||
+        ""
+    ).trim();
+
+    const csv = buildDraftCsv({
+      sku: body.sku,
+      categoryId,
+      title,
+      price,
+      imageUrls,
+      description,
+    });
+
+    // Step 1: create the Seller Hub FX_LISTING upload task.
+    const taskResp = await fetch(`${FEED_BASE}/task`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "Accept-Language": "en-US",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+      },
+      body: JSON.stringify({
+        feedType: "FX_LISTING",
+        schemaVersion: "1.0",
+      }),
+    });
+
+    if (!taskResp.ok) {
+      const error = await ebayError(taskResp);
+      console.error(
+        `[ebay/draft] createTask failed sku=${body.sku} http=${taskResp.status} ${error}`
+      );
+
+      return NextResponse.json(
+        { success: false, sku: body.sku, error },
+        { status: 422 }
+      );
+    }
+
+    const location = taskResp.headers.get("location") || "";
+    const taskId = location.split("/").filter(Boolean).pop();
+
+    if (!taskId) {
+      return NextResponse.json(
+        {
+          success: false,
+          sku: body.sku,
+          error: "eBay created the feed task but did not return a task ID.",
+        },
+        { status: 500 }
+      );
+    }
+
+    // Step 2: upload the Create-new-drafts CSV.
+    const form = new FormData();
+    const fileName = `ebay-draft-${body.sku}.csv`;
+
+    form.append(
+      "file",
+      new Blob([csv], { type: "text/csv;charset=utf-8" }),
+      fileName
+    );
+
+    const uploadResp = await fetch(
+      `${FEED_BASE}/task/${encodeURIComponent(taskId)}/upload_file`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: form,
+      }
+    );
+
+    if (!uploadResp.ok) {
+      const error = await ebayError(uploadResp);
+
+      console.error(
+        `[ebay/draft] uploadFile failed sku=${body.sku} task=${taskId} http=${uploadResp.status} ${error}`
+      );
+
+      return NextResponse.json(
+        {
+          success: false,
+          sku: body.sku,
+          taskId,
+          error,
+        },
+        { status: 422 }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      sku: body.sku,
+      taskId,
+      message: "Draft sent to eBay.",
+    });
+  } catch (e) {
+    console.error(`[ebay/draft] unhandled error sku=${body.sku}:`, e);
+
+    return NextResponse.json(
+      {
+        success: false,
+        sku: body.sku,
+        error: (e as Error).message,
+      },
+      { status: 500 }
+    );
+  }
+}
