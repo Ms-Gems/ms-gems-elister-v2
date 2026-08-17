@@ -544,7 +544,106 @@ export default function Home() {
     },
     [photoMap]
   );
+const draftGroup = useCallback(
+  async (groupId: string) => {
+    const group = groupsRef.current.find((g) => g.id === groupId);
+    if (!group || !group.listing) return;
 
+    const images = group.photoIds
+      .map((id) => photoMap.get(id))
+      .filter((p): p is Photo => Boolean(p))
+      .map((p) => ({ mediaType: p.mediaType, data: p.data }))
+      .slice(0, MAX_PUBLISH_PHOTOS);
+
+    setGroups((prev) =>
+      prev.map((g) =>
+        g.id === groupId
+          ? { ...g, postStatus: "posting", postError: undefined }
+          : g
+      )
+    );
+
+    try {
+      const imageUrls: string[] = [];
+      let uploadedCount = 0;
+
+      for (const batch of chunkImagesForUpload(images)) {
+        for (let attempt = 0; ; attempt++) {
+          const res = await apiPost("/api/ebay/upload-photos", {
+            sku: group.sku,
+            images: batch,
+            startIndex: uploadedCount,
+          });
+
+          if (attempt < 2 && TRANSIENT_STATUSES.has(res.status)) {
+            await sleep(res.status === 429 ? 65_000 : 8_000);
+            continue;
+          }
+
+          const d = (await readJson(res)) as {
+            ok?: boolean;
+            error?: string;
+            urls?: string[];
+          };
+
+          if (!d.ok) {
+            throw new Error(d.error || "Could not upload photos to eBay.");
+          }
+
+          imageUrls.push(...(Array.isArray(d.urls) ? d.urls : []));
+          break;
+        }
+
+        uploadedCount += batch.length;
+      }
+
+      if (imageUrls.length === 0) {
+        throw new Error("Could not upload any photos to eBay.");
+      }
+
+      const res = await apiPost("/api/ebay/draft", {
+        sku: group.sku,
+        listing: group.listing,
+        imageUrls,
+      });
+
+      const data = (await readJson(res)) as {
+        success?: boolean;
+        error?: string;
+        taskId?: string;
+      };
+
+      if (!data.success) {
+        throw new Error(data.error || "eBay rejected the draft.");
+      }
+
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === groupId
+            ? {
+                ...g,
+                postStatus: "posted",
+                postWarnings: ["Saved to eBay drafts."],
+              }
+            : g
+        )
+      );
+    } catch (e) {
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === groupId
+            ? {
+                ...g,
+                postStatus: "error",
+                postError: (e as Error).message,
+              }
+            : g
+        )
+      );
+    }
+  },
+  [photoMap]
+);
   const postAll = async () => {
     const ready = groups
       .filter((g) => g.status === "done" && g.postStatus !== "posted")
@@ -731,6 +830,7 @@ export default function Home() {
           onRenameSku={renameSku}
           onRetry={writeGroup}
           onPost={postGroup}
+          onDraft={draftGroup}
           onPostAll={postAll}
           onBack={() => setStep("review")}
         />
