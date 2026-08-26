@@ -227,7 +227,7 @@ export async function POST(req: NextRequest) {
       description,
     });
 
-    // Step 1: create the Seller Hub FX_LISTING upload task.
+    // Step 1: create the Seller Hub FX_DRAFT upload task.
     const taskResp = await fetch(`${FEED_BASE}/task`, {
       method: "POST",
       headers: {
@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
         "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
       },
       body: JSON.stringify({
-        feedType: "FX_LISTING",
+        feedType: "FX_DRAFT",
         schemaVersion: "1.0",
       }),
     });
