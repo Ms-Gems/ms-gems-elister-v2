@@ -292,7 +292,7 @@ function isApparelConditionPolicy(acceptedIds: Set<number>): boolean {
   return acceptedIds.has(2990) || acceptedIds.has(3010);
 }
 
-function conditionIdsForGrade(
+export function conditionIdsForGrade(
   grade: string,
   acceptedIds: Set<number>,
   catKey: string
@@ -362,7 +362,7 @@ function departmentForCategory(catKey: string): string {
 // aspect metadata arrives, enforceCardinality() trims single-value aspects.
 // Placeholder phrases ("See tag in photos") never become aspect values —
 // cleanAspectValue/splitAspectValues drop them at the door.
-function buildAspects(listing: ListingResult, catKey: string): Record<string, string[]> {
+export function buildAspects(listing: ListingResult, catKey: string): Record<string, string[]> {
   const aspects: Record<string, string[]> = {};
   const putOne = (k: string, v: string) => {
     const val = cleanAspectValue(v);
