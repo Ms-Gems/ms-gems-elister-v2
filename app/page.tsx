@@ -654,6 +654,17 @@ const draftGroup = useCallback(
     }
   };
 
+  const draftAll = async () => {
+  const ready = groups
+    .filter((g) => g.status === "done" && g.postStatus !== "posted")
+    .map((g) => g.id);
+
+  // Sequential — keeps eBay calls gentle and errors easy to read.
+  for (const id of ready) {
+    await draftGroup(id);
+  }
+};
+  
   const usableGroups = useMemo(
     () => groups.filter((g) => g.photoIds.length > 0),
     [groups]
@@ -832,6 +843,7 @@ const draftGroup = useCallback(
           onPost={postGroup}
           onDraft={draftGroup}
           onPostAll={postAll}
+          onDraftAll={draftAll}
           onBack={() => setStep("review")}
         />
       )}
