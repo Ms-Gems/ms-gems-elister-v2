@@ -293,7 +293,7 @@ function isApparelConditionPolicy(acceptedIds: Set<number>): boolean {
 }
 
 export function conditionIdsForGrade(
-  grade: string,
+  grade: string | undefined,
   acceptedIds: Set<number>,
   catKey: string
 ): number[] {
