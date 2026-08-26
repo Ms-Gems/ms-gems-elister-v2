@@ -308,12 +308,96 @@ export async function POST(req: NextRequest) {
       );
     }
 
+      // Step 3: wait for eBay to actually process the uploaded draft.
+    let taskStatus = "";
+    let taskData: any = null;
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      const statusResp = await fetch(
+        `${FEED_BASE}/task/${encodeURIComponent(taskId)}`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: "application/json",
+          },
+        }
+      );
+
+      if (!statusResp.ok) {
+        const error = await ebayError(statusResp);
+        return NextResponse.json(
+          {
+            success: false,
+            sku: body.sku,
+            taskId,
+            error: `Could not check eBay draft status: ${error}`,
+          },
+          { status: 422 }
+        );
+      }
+
+      taskData = await statusResp.json();
+      taskStatus = String(taskData?.status || "");
+
+      if (
+        taskStatus === "COMPLETED" ||
+        taskStatus === "COMPLETED_WITH_ERROR"
+      ) {
+        break;
+      }
+    }
+
+    const successCount = Number(taskData?.uploadSummary?.successCount || 0);
+    const failureCount = Number(taskData?.uploadSummary?.failureCount || 0);
+
+    if (taskStatus !== "COMPLETED") {
+      return NextResponse.json(
+        {
+          success: false,
+          sku: body.sku,
+          taskId,
+          taskStatus,
+          successCount,
+          failureCount,
+          error:
+            taskStatus === "COMPLETED_WITH_ERROR"
+              ? "eBay processed the draft but reported an error."
+              : `eBay draft processing did not complete. Status: ${
+                  taskStatus || "unknown"
+                }`,
+        },
+        { status: 422 }
+      );
+    }
+
+    if (successCount < 1 || failureCount > 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          sku: body.sku,
+          taskId,
+          taskStatus,
+          successCount,
+          failureCount,
+          error: "eBay finished processing, but did not confirm a successful draft.",
+        },
+        { status: 422 }
+      );
+    }
+
     return NextResponse.json({
       success: true,
       sku: body.sku,
       taskId,
-      message: "Draft sent to eBay.",
+      taskStatus,
+      successCount,
+      failureCount,
+      message: "Draft successfully processed by eBay.",
     });
+
   } catch (e) {
     console.error(`[ebay/draft] unhandled error sku=${body.sku}:`, e);
 
