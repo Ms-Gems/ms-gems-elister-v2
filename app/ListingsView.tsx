@@ -78,9 +78,17 @@ export function ListingsView({
               `🚀 Post all ${readyToPost} to eBay`
             )}
           </button>
+           <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={onDraftAll}
+            disabled={posting}
+          >
+              `📋 Save all ${readyToPost} to eBay Drafts`
+</button>
         </div>
       )}
-
+    
       <div className="listing-list">
         {groups.map((group) => (
           <ListingCard
