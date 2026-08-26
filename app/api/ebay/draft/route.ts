@@ -4,9 +4,14 @@ import { guardApiRequest } from "@/lib/api-guard";
 import {
   sanitizeEbayImageUrls,
   uploadPhotos,
+  buildAspects,
+  conditionIdsForGrade,
   type PublishInput,
 } from "@/lib/ebay/publish";
-import { suggestLeafCategories } from "@/lib/ebay/taxonomy";
+import {
+  suggestLeafCategories,
+  acceptedConditionIds,
+} from "@/lib/ebay/taxonomy";
 
 export const maxDuration = 300;
 
@@ -24,82 +29,90 @@ function buildDraftCsv(args: {
   price: string;
   imageUrls: string[];
   description: string;
+  conditionId: string;
+  aspects: Record<string, string[]>;
 }): string {
   const header =
     "Action(SiteID=US|Country=US|Currency=USD|Version=1193|CC=UTF-8)";
+
+  // eBay bulk-upload item-specific columns use the C: prefix.
+  // buildAspects() already gives us the important fields such as
+  // Brand, Size, Color, Material, Type, Department, Features, etc.
+  const aspectEntries = Object.entries(args.aspects)
+    .filter(([name, values]) => {
+      return (
+        name &&
+        !name.startsWith("---") &&
+        Array.isArray(values) &&
+        values.some((v) => String(v || "").trim())
+      );
+    })
+    .slice(0, 45);
+
+  const aspectHeaders = aspectEntries.map(([name]) => `C:${name}`);
+  const aspectValues = aspectEntries.map(([, values]) =>
+    values
+      .map((v) => String(v || "").trim())
+      .filter(Boolean)
+      .join("|")
+  );
+
+  const columnHeaders = [
+    header,
+    "Custom label (SKU)",
+    "Category ID",
+    "Title",
+    "UPC",
+    "Price",
+    "Quantity",
+    "Item photo URL",
+    "Condition ID",
+    "Description",
+    "Format",
+    ...aspectHeaders,
+  ];
+
+  const dataRow = [
+    "Draft",
+    args.sku,
+    args.categoryId,
+    args.title,
+    "",
+    args.price,
+    "1",
+    args.imageUrls.join("|"),
+    args.conditionId,
+    args.description,
+    "FixedPrice",
+    ...aspectValues,
+  ];
+
+  const blankInfoTail = new Array(
+    Math.max(0, columnHeaders.length - 1)
+  ).fill("");
 
   const rows = [
     [
       "#INFO",
       "Version=0.0.2",
       "Template= eBay-draft-listings-template_US",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
+      ...new Array(Math.max(0, columnHeaders.length - 3)).fill(""),
     ],
     [
       "#INFO Action and Category ID are required fields. 1) Set Action to Draft 2) Please find the category ID for your listings here: https://pages.ebay.com/sellerinformation/news/categorychanges.html",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
+      ...blankInfoTail,
     ],
     [
       "#INFO After you've successfully uploaded your draft from the Seller Hub Reports tab, complete your drafts to active listings here: https://www.ebay.com/sh/lst/drafts",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
+      ...blankInfoTail,
     ],
-    ["#INFO", "", "", "", "", "", "", "", "", "", ""],
-    [
-      header,
-      "Custom label (SKU)",
-      "Category ID",
-      "Title",
-      "UPC",
-      "Price",
-      "Quantity",
-      "Item photo URL",
-      "Condition ID",
-      "Description",
-      "Format",
-    ],
-    [
-      "Draft",
-      args.sku,
-      args.categoryId,
-      args.title,
-      "",
-      args.price,
-      "1",
-      args.imageUrls.join("|"),
-      "",
-      args.description,
-      "FixedPrice",
-    ],
+    ["#INFO", ...blankInfoTail],
+    columnHeaders,
+    dataRow,
   ];
 
   return rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
 }
-
 async function ebayError(resp: Response): Promise<string> {
   const text = await resp.text();
 
@@ -218,14 +231,45 @@ export async function POST(req: NextRequest) {
         ""
     ).trim();
 
-    const csv = buildDraftCsv({
-      sku: body.sku,
-      categoryId,
-      title,
-      price,
-      imageUrls,
-      description,
-    });
+   // Build the same core item specifics used by the live publisher.
+const catKey = String(listing.category || "other");
+const aspects = buildAspects(listing, catKey);
+
+// Determine a category-valid numeric eBay Condition ID.
+let conditionId = "";
+
+try {
+  const acceptedConds = await acceptedConditionIds(
+    categoryId,
+    accessToken
+  );
+
+  const conditionIds = conditionIdsForGrade(
+    listing.condition,
+    acceptedConds,
+    catKey
+  );
+
+  if (conditionIds.length) {
+    conditionId = String(conditionIds[0]);
+  }
+} catch (e) {
+  console.warn(
+    `[ebay/draft] couldn't determine condition for sku=${body.sku}:`,
+    e
+  );
+}
+
+const csv = buildDraftCsv({
+  sku: body.sku,
+  categoryId,
+  title,
+  price,
+  imageUrls,
+  description,
+  conditionId,
+  aspects,
+});
 
     // Step 1: create the Seller Hub FX_DRAFT upload task.
     const taskResp = await fetch(`${FEED_BASE}/task`, {
