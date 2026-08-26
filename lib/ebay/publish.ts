@@ -213,7 +213,7 @@ export function validListingPrice(raw: number | string | undefined): number | nu
 // dimensions) on the inventory item, or publish fails with error 25020 ("package
 // weight is not valid or is missing"). Flat-rate policies don't need it.
 //
-// One 16 oz / 12×9×3 default for everything undercharged shipping badly for
+// One 16 oz / 10×13×1 default for everything undercharged shipping badly for
 // coats, boots, appliances, and framed art, so defaults are now profiled by
 // item class. The seller can still refine weight/size on the listing afterward.
 // Explicitly-set EBAY_DEFAULT_PACKAGE_* env vars override every profile.
@@ -233,7 +233,7 @@ interface PackageProfile {
   h: number;
 }
 
-const DEFAULT_PACKAGE: PackageProfile = { oz: 16, l: 12, w: 9, h: 3 };
+const DEFAULT_PACKAGE: PackageProfile = { oz: 16, l: 10, w: 13, h: 1 };
 
 const PACKAGE_PROFILES: Record<string, PackageProfile> = (() => {
   const size = (oz: number, l: number, w: number, h: number): PackageProfile => ({
@@ -293,7 +293,7 @@ function isApparelConditionPolicy(acceptedIds: Set<number>): boolean {
 }
 
 export function conditionIdsForGrade(
-  grade: string | undefined,
+  grade: string,
   acceptedIds: Set<number>,
   catKey: string
 ): number[] {
