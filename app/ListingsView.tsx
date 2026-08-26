@@ -16,7 +16,9 @@ interface ListingsViewProps {
   onRenameSku: (groupId: string, sku: string) => void;
   onRetry: (groupId: string) => void;
   onPost: (groupId: string) => void;
+  onDraft: (groupId: string) => void;
   onPostAll: () => void;
+  onDraftAll: () => void;
   onBack: () => void;
 }
 
@@ -28,7 +30,9 @@ export function ListingsView({
   onRenameSku,
   onRetry,
   onPost,
+  onDraft,
   onPostAll,
+  onDraftAll,
   onBack,
 }: ListingsViewProps) {
   const done = groups.filter((g) => g.status === "done").length;
@@ -74,9 +78,17 @@ export function ListingsView({
               `🚀 Post all ${readyToPost} to eBay`
             )}
           </button>
+           <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={onDraftAll}
+            disabled={posting}
+          >
+              `📋 Save all ${readyToPost} to eBay Drafts`
+</button>
         </div>
       )}
-
+    
       <div className="listing-list">
         {groups.map((group) => (
           <ListingCard
@@ -87,6 +99,7 @@ export function ListingsView({
             onEdit={onEdit}
             onRenameSku={onRenameSku}
             onRetry={onRetry}
+            onDraft={onDraft}
             onPost={onPost}
           />
         ))}

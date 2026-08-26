@@ -59,6 +59,7 @@ interface ListingCardProps {
   onEdit: (groupId: string, patch: Partial<ListingResult>) => void;
   onRenameSku: (groupId: string, sku: string) => void;
   onRetry: (groupId: string) => void;
+  onDraft: (groupId: string) =>void;
   onPost: (groupId: string) => void;
 }
 
@@ -69,6 +70,7 @@ export function ListingCard({
   onEdit,
   onRenameSku,
   onRetry,
+  onDraft,
   onPost,
 }: ListingCardProps) {
   const [open, setOpen] = useState(true);
@@ -319,7 +321,9 @@ export function ListingCard({
           {group.postStatus === "posted" ? (
             <>
               <p className="post-result ok">
-                ✅ Posted to eBay
+                {group.postWarnings?.includes("Saved to eBay drafts.")
+                      ? "✅ Saved to eBay Drafts"
+                      : "✅ Posted to eBay"}
                 {group.listingId ? (
                   <>
                     {" "}
@@ -342,6 +346,15 @@ export function ListingCard({
             </>
           ) : ebayConnected ? (
             <div className="post-row">
+             <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => onDraft(group.id)}
+                disabled={group.postStatus === "posting"}
+              >
+                📝 Save to eBay Drafts
+              </button>
+              
               <button
                 type="button"
                 className="btn btn-primary"
