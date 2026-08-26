@@ -245,7 +245,7 @@ try {
   );
 
   const conditionIds = conditionIdsForGrade(
-    listing.condition,
+    listing.condition || "GOOD",
     acceptedConds,
     catKey
   );
