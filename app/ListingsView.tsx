@@ -18,6 +18,7 @@ interface ListingsViewProps {
   onPost: (groupId: string) => void;
   onDraft: (groupId: string) => void;
   onPostAll: () => void;
+  onDraftAll: () => void;
   onBack: () => void;
 }
 
@@ -31,6 +32,7 @@ export function ListingsView({
   onPost,
   onDraft,
   onPostAll,
+  onDraftAll,
   onBack,
 }: ListingsViewProps) {
   const done = groups.filter((g) => g.status === "done").length;
