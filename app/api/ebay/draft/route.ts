@@ -6,6 +6,7 @@ import {
   uploadPhotos,
   buildAspects,
   conditionIdsForGrade,
+  fetchAccountSetup,
   type PublishInput,
 } from "@/lib/ebay/publish";
 import {
