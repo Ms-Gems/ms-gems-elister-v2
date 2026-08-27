@@ -816,7 +816,7 @@ async function fetchAccountSetupUncached(accessToken: string): Promise<AccountSe
     ebayRequest(accessToken, "GET", `${EBAY_ACC_BASE}/return_policy?${mp}`),
   ]);
   return {
-    fulfillmentPolicyId: pickFirstPolicy(ful, "fulfillmentPolicies", "fulfillmentPolicyId"),
+    fulfillmentPolicyId: "252540531019",
     paymentPolicyId: pickFirstPolicy(pay, "paymentPolicies", "paymentPolicyId"),
     returnPolicyId: pickFirstPolicy(ret, "returnPolicies", "returnPolicyId"),
     locationKey: await fetchOrCreateLocation(accessToken),
