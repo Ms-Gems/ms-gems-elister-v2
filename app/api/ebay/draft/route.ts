@@ -73,6 +73,9 @@ function buildDraftCsv(args: {
     "Condition ID",
     "Description",
     "Format",
+    "Shipping profile ID",
+    "Payment profile ID",
+    "Return profile ID",
     ...aspectHeaders,
   ];
 
@@ -88,6 +91,9 @@ function buildDraftCsv(args: {
     args.conditionId,
     args.description,
     "FixedPrice",
+    args.fulfillmentPolicyId,
+    args.paymentPolicyId,
+    args.returnPolicyId,
     ...aspectValues,
   ];
 
