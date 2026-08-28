@@ -824,32 +824,51 @@ async function fetchAccountSetupUncached(accessToken: string): Promise<AccountSe
 }
 
 async function fetchOrCreateLocation(accessToken: string): Promise<string> {
-  const list = await ebayRequest(accessToken, "GET", `${EBAY_INV_BASE}/location`);
-  if (list.ok) {
-    for (const loc of list.json?.locations || []) {
-      if (loc.merchantLocationStatus === "ENABLED" && loc.merchantLocationKey) {
-        return loc.merchantLocationKey;
-      }
-    }
-  }
   const key = "HOME_OFFICE";
+  const postalCode = process.env.EBAY_LOCATION_POSTAL_CODE || "10001";
+
   const payload = {
     name: "Home Office",
     merchantLocationStatus: "ENABLED",
     locationTypes: ["WAREHOUSE"],
     location: {
       address: {
-        // Set EBAY_LOCATION_POSTAL_CODE to your own ZIP. Only used the first
-        // time, to create an inventory location if you don't already have one.
-        postalCode: process.env.EBAY_LOCATION_POSTAL_CODE || "10001",
+        postalCode,
         country: "US",
       },
     },
   };
-  await ebayRequest(accessToken, "POST", `${EBAY_INV_BASE}/location/${key}`, {
-    body: payload,
-    extraHeaders: { "Content-Language": "en-US" },
-  });
+
+  // Create or update our dedicated inventory location so we don't accidentally
+  // use some other enabled eBay location with the wrong ZIP.
+  const existing = await ebayRequest(
+    accessToken,
+    "GET",
+    `${EBAY_INV_BASE}/location/${key}`
+  );
+
+  if (existing.ok) {
+    await ebayRequest(
+      accessToken,
+      "POST",
+      `${EBAY_INV_BASE}/location/${key}`,
+      {
+        body: payload,
+        extraHeaders: { "Content-Language": "en-US" },
+      }
+    );
+  } else {
+    await ebayRequest(
+      accessToken,
+      "POST",
+      `${EBAY_INV_BASE}/location/${key}`,
+      {
+        body: payload,
+        extraHeaders: { "Content-Language": "en-US" },
+      }
+    );
+  }
+
   return key;
 }
 
