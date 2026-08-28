@@ -848,16 +848,16 @@ async function fetchOrCreateLocation(accessToken: string): Promise<string> {
   );
 
   if (existing.ok) {
-    await ebayRequest(
-      accessToken,
-      "POST",
-      `${EBAY_INV_BASE}/location/${key}`,
-      {
-        body: payload,
-        extraHeaders: { "Content-Language": "en-US" },
-      }
-    );
-  } else {
+  await ebayRequest(
+    accessToken,
+    "POST",
+    `${EBAY_INV_BASE}/location/${key}/update_location_details`,
+    {
+      body: payload,
+      extraHeaders: { "Content-Language": "en-US" },
+    }
+  );
+} else {
     await ebayRequest(
       accessToken,
       "POST",
