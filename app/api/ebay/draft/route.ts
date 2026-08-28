@@ -31,6 +31,9 @@ function buildDraftCsv(args: {
   imageUrls: string[];
   description: string;
   conditionId: string;
+  fulfillmentPolicyId: string;
+  paymentPolicyId: string;
+  returnPolicyId: string;
   aspects: Record<string, string[]>;
 }): string {
   const header =
@@ -176,6 +179,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const setup = await fetchAccountSetup(accessToken);
+  
   try {
     const listing = body.listing;
 
@@ -269,6 +274,9 @@ const csv = buildDraftCsv({
   imageUrls,
   description,
   conditionId,
+  fulfillmentPolicyId: setup.fulfillmentPolicyId,
+  paymentPolicyId: setup.paymentPolicyId,
+  returnPolicyId: setup.returnPolicyId,
   aspects,
 });
 
