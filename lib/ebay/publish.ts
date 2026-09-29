@@ -760,7 +760,7 @@ async function uploadPhoto(
   );
 
   const resp = await fetch(
-    "https://api.ebay.com/commerce/media/v1_beta/image/create_image_from_file",
+    "https://apim.ebay.com/commerce/media/v1_beta/image/create_image_from_file",
     {
       method: "POST",
       headers: {
