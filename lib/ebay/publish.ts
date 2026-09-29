@@ -741,7 +741,7 @@ function updateOfferBody(offer: Record<string, unknown>): Record<string, unknown
   return Object.fromEntries(Object.entries(offer).filter(([k]) => !skip.has(k)));
 }
 
-// ── Photo upload to eBay Picture Services (Trading API, XML) ──────────────────
+// ── Photo upload to eBay Picture Services (Media API) ─────────────────────────
 
 async function uploadPhoto(
   accessToken: string,
@@ -749,33 +749,39 @@ async function uploadPhoto(
   mediaType: string,
   name: string
 ): Promise<string | null> {
-  const xml = `<?xml version="1.0" encoding="utf-8"?>
-<UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">
-  <PictureName>${name.slice(0, 50)}</PictureName>
-  <PictureUploadPolicy>ClearAndNew</PictureUploadPolicy>
-</UploadSiteHostedPicturesRequest>`;
-
   const data = base64.includes(",") ? base64.split(",")[1] : base64;
   const bytes = Buffer.from(data, "base64");
+
   const form = new FormData();
-  form.append("XML Payload", new Blob([xml], { type: "text/xml;charset=utf-8" }), "payload.xml");
-  form.append("image", new Blob([new Uint8Array(bytes)], { type: mediaType }), name);
+  form.append(
+    "image",
+    new Blob([new Uint8Array(bytes)], { type: mediaType }),
+    name
+  );
 
-  const resp = await fetch(EBAY_TRADING, {
-    method: "POST",
-    headers: {
-      "X-EBAY-API-SITEID": "0",
-      "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
-      "X-EBAY-API-CALL-NAME": "UploadSiteHostedPictures",
-      "X-EBAY-API-IAF-TOKEN": accessToken,
-    },
-    body: form,
-  });
-  const text = await resp.text();
-  const m = text.match(/<FullURL>([^<]+)<\/FullURL>/);
-  return m ? m[1] : null;
+  const resp = await fetch(
+    "https://api.ebay.com/commerce/media/v1_beta/image/create_image_from_file",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+      body: form,
+    }
+  );
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    console.error(
+      `[ebay/uploadPhoto] Media API failed name=${name} http=${resp.status} ${text.slice(0, 500)}`
+    );
+    return null;
+  }
+
+  const json = await resp.json();
+  return typeof json?.imageUrl === "string" ? json.imageUrl : null;
 }
-
 // ── Policies & location ──────────────────────────────────────────────────────
 
 export interface AccountSetup {
